@@ -609,9 +609,47 @@ s = open(p).read()
 i = s.index('# 8. Юнит systemd')
 open(p, 'w').write(s[:i] + 'zl_die "СБОЙ (имитация)"\n\n' + s[i:])
 PY
-	# Макет systemctl в тестах сообщает, что служба не запущена, поэтому
-	# останова не происходит и предупреждения быть не должно.
+	# В префиксе служба не останавливается (systemd не задействуется),
+	# поэтому предупреждения о неработающем обходе быть не должно.
 	run install_pkg "$pkg"
 	[ "$status" -ne 0 ]
 	[[ "$output" != *"обход не работает"* ]]
+}
+
+@test "в режиме префикса systemd не задействуется" {
+	# Это не косметика: раньше установка в префикс от обычного
+	# пользователя падала на "Failed to connect to bus", а тесты этого
+	# не видели, потому что systemctl был подменён заглушкой.
+	run zl doctor
+	[[ "$output" == *"systemd не задействуется"* ]]
+	[[ "$output" == *"службой не управляем"* ]]
+	[[ "$output" != *"systemd не обнаружен"* ]]
+}
+
+@test "полный цикл проходит без systemctl в PATH" {
+	# Ровно то, что делает release.yml на собранном артефакте: если код
+	# где-то дёргает systemctl в обход zl_manage_systemd, здесь это
+	# вылезет.
+	local nosys="$BATS_TEST_TMPDIR/nosys" p c
+	mkdir -p "$nosys"
+	for c in sh dash cp mv rm ln find sed grep awk sort comm head tail cat \
+	         cut mkdir rmdir chmod chown install sha256sum stat date \
+	         basename dirname readlink xargs ls du df tr wc id uname \
+	         mktemp nft python3 tar seq; do
+		p=$(command -v "$c" 2>/dev/null) || continue
+		[ -x "$p" ] || continue
+		ln -sf "$p" "$nosys/$c"
+	done
+	# Проверяем не наличие файла, а то, что команда действительно
+	# недоступна с этим PATH.
+	if PATH="$nosys" command -v systemctl >/dev/null 2>&1; then
+		echo "systemctl доступен в изолированном PATH"
+		return 1
+	fi
+
+	( cd "$PKG" && PATH="$nosys" sh ./install.sh --strategy general ) >/dev/null
+	[ -L "$ZL_PREFIX/opt/zapret-lite/current" ]
+	( cd "$PKG" && PATH="$nosys" sh ./uninstall.sh --purge ) >/dev/null
+	run find "$ZL_PREFIX" -type f
+	[ -z "$output" ]
 }

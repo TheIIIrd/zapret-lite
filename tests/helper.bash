@@ -26,26 +26,24 @@ setup_root() {
 	make_fakebin
 }
 
-# systemctl в тестах заглушается: настоящего systemd в контейнере нет,
-# а проверяем мы раскладку файлов и логику, а не работу службы.
+# systemctl больше НЕ подменяется. В режиме префикса код к systemd не
+# обращается вовсе - юнит лежит под префиксом, настоящий systemd его не
+# видит, так что обращение было бы и бесполезным, и лезущим в систему.
+#
+# Подмена была вредна: она скрывала дефект. Настоящая установка в
+# префикс от обычного пользователя падала на "Failed to connect to bus",
+# а тесты этого не видели, потому что говорили с заглушкой.
+#
+# nft подменяется по другой причине: определение типа firewall от
+# обычного пользователя опирается на наличие команды, и без неё
+# установщик справедливо откажется работать.
 make_fakebin() {
 	mkdir -p "$BATS_TEST_TMPDIR/fakebin"
-	cat >"$BATS_TEST_TMPDIR/fakebin/systemctl" <<'EOF'
-#!/bin/sh
-case "$1" in
-  is-active|is-enabled) exit 3 ;;
-esac
-exit 0
-EOF
 	cat >"$BATS_TEST_TMPDIR/fakebin/nft" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-	chmod +x "$BATS_TEST_TMPDIR/fakebin/systemctl" "$BATS_TEST_TMPDIR/fakebin/nft"
-	# /run/systemd/system должен существовать, иначе zl_systemd_ok
-	# считает систему не-systemd. Создать его в префиксе нельзя:
-	# проверка смотрит на абсолютный путь.
-	mkdir -p /run/systemd/system
+	chmod +x "$BATS_TEST_TMPDIR/fakebin/nft"
 }
 
 # Собирает комплект для установки: наши файлы + vendor из указанного
