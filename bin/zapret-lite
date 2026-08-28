@@ -35,8 +35,8 @@ usage() {
 # поэтому смена режима ipset или правка списков рестарта НЕ требуют.
 # Рестарт нужен там, где меняются порты в правилах firewall.
 restart_service() {
-	zl_systemd_ok || {
-		zl_warn "systemd недоступен, перезапустите zapret вручную"
+	zl_manage_systemd || {
+		[ -n "$ZL_PREFIX" ] || zl_warn "systemd недоступен, перезапустите zapret вручную"
 		return 0
 	}
 	systemctl is-enabled --quiet zapret 2>/dev/null || {
@@ -89,7 +89,7 @@ cmd_status() {
 	game=$(read_state "$ZL_ETC/game-filter.mode" disabled)
 	fw=$(zl_detect_fwtype)
 
-	if zl_systemd_ok && systemctl is-active --quiet zapret 2>/dev/null; then
+	if zl_manage_systemd && systemctl is-active --quiet zapret 2>/dev/null; then
 		active="работает"
 	else
 		active="остановлена"
@@ -284,7 +284,9 @@ cmd_doctor() {
 	local gen strat fw n missing bin out mode p dis6
 
 	printf '\n--- Окружение\n'
-	if zl_systemd_ok; then
+	if [ -n "$ZL_PREFIX" ]; then
+		d_ok "префикс $ZL_PREFIX: systemd не задействуется"
+	elif zl_systemd_ok; then
 		d_ok "systemd доступен"
 	else
 		d_bad "systemd не обнаружен"
@@ -440,7 +442,9 @@ cmd_doctor() {
 	fi
 
 	printf '\n--- Служба\n'
-	if zl_systemd_ok; then
+	if ! zl_manage_systemd; then
+		d_ok "префикс: службой не управляем"
+	else
 		if systemctl is-enabled --quiet zapret 2>/dev/null; then
 			d_ok "автозапуск включён"
 		else

@@ -79,8 +79,13 @@ zl_step "Проверка системы"
 
 [ "$DRY_RUN" = 1 ] || zl_require_root
 
-zl_systemd_ok || zl_die "systemd не обнаружен. zapret-lite поддерживает только systemd-системы."
-zl_info "systemd: есть"
+if [ -n "$ZL_PREFIX" ]; then
+	zl_info "установка в префикс $ZL_PREFIX: systemd не задействуется"
+elif zl_systemd_ok; then
+	zl_info "systemd: есть"
+else
+	zl_die "systemd не обнаружен. zapret-lite поддерживает только systemd-системы."
+fi
 
 ARCH="$(zl_detect_arch)"
 zl_info "архитектура: $ARCH"
@@ -231,7 +236,7 @@ on_exit() {
 }
 trap on_exit EXIT
 
-if [ "$DRY_RUN" = 0 ] && systemctl is-active --quiet zapret 2>/dev/null; then
+if [ "$DRY_RUN" = 0 ] && zl_manage_systemd && systemctl is-active --quiet zapret 2>/dev/null; then
 	zl_step "Остановка zapret"
 	run systemctl stop zapret
 	SERVICE_WAS_STOPPED=1
@@ -470,7 +475,9 @@ run cp -f "$SRC/systemd/10-zapret-lite.conf" "$ZL_SYSTEMD_DIR/zapret.service.d/1
 run cp -f "$SRC/systemd/zapret-lite-check-update.service" "$ZL_SYSTEMD_DIR/"
 run cp -f "$SRC/systemd/zapret-lite-check-update.timer" "$ZL_SYSTEMD_DIR/"
 
-if [ "$DRY_RUN" = 0 ]; then
+if [ "$DRY_RUN" = 0 ] && ! zl_manage_systemd; then
+	zl_info "служба не регистрируется: установка в префикс"
+elif [ "$DRY_RUN" = 0 ]; then
 	systemctl daemon-reload
 	systemctl enable zapret >/dev/null 2>&1 || zl_die "не удалось включить службу zapret"
 	# Источник по умолчанию - релизы flowseal, поэтому ждать

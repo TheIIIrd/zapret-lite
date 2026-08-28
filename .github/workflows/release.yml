@@ -112,14 +112,43 @@ jobs:
           echo "NAME=$NAME" >> "$GITHUB_ENV"
 
       - name: Проверить, что комплект ставится
+        # Проверяется собранный архив, а не дерево репозитория, и
+        # установка настоящая, а не --dry-run: только так исполняются
+        # проверка манифеста, сборка поколения и запись конфига.
+        #
+        # В режиме префикса systemd не задействуется, поэтому root не
+        # нужен и настоящая система не затрагивается.
         run: |
-          sudo apt-get install -y -qq bats
-          # Установка в префикс: то же, что делают тесты, но уже на
-          # собранном архиве, а не на дереве репозитория.
+          set -eu
           tar -xzf "dist/$NAME.tar.gz" -C /tmp
-          sudo mkdir -p /run/systemd/system
-          ZL_PREFIX=/tmp/testroot sh "/tmp/$NAME/install.sh" \
-            --strategy general --dry-run
+          ZL_PREFIX=/tmp/testroot sh "/tmp/$NAME/install.sh" --strategy general
+
+          # Конфиг обязан читаться тем же шеллом, что и на целевой
+          # машине, и все пути в нём - существовать.
+          dash -c '
+            . /tmp/testroot/opt/zapret/config
+            [ "$NFQWS_ENABLE" = 1 ] || exit 1
+            set -- $NFQWS_OPT
+            [ $# -gt 20 ] || exit 2
+            for a in "$@"; do
+              case "$a" in *=/*) p=${a#*=}; [ -e "$p" ] || { echo "нет $p"; exit 3; } ;; esac
+            done
+            echo "аргументов nfqws: $#"
+          '
+
+          # Настоящий бинарник из релиза разбирает опции стратегии.
+          ZL_LIB=/tmp/testroot/opt/zapret-lite/lib \
+            ZL_PREFIX=/tmp/testroot \
+            /tmp/testroot/usr/local/bin/zapret-lite doctor
+
+          # Удаление обязано быть симметричным.
+          ZL_PREFIX=/tmp/testroot sh "/tmp/$NAME/uninstall.sh" --purge
+          if [ -n "$(find /tmp/testroot -type f 2>/dev/null)" ]; then
+            echo "::error::после --purge остались файлы"
+            find /tmp/testroot -type f
+            exit 1
+          fi
+          echo "установка, диагностика и удаление прошли на собранном архиве"
 
       # Запуск по кнопке даёт артефакт, а не релиз: собрать и проверить
       # комплект нужно уметь, не публикуя его.

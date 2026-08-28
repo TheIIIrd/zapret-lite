@@ -49,7 +49,7 @@ run() {
 # =====================================================================
 zl_step "Остановка службы"
 
-if zl_systemd_ok && systemctl list-unit-files zapret.service >/dev/null 2>&1; then
+if zl_manage_systemd && systemctl list-unit-files zapret.service >/dev/null 2>&1; then
 	# ExecStop у zapret.service вызывает init.d/sysv/zapret stop, который
 	# снимает свои правила. Останавливаем ДО удаления файлов, иначе
 	# снимать правила будет нечем и они останутся в системе.
@@ -94,7 +94,7 @@ zl_step "Удаление юнитов"
 # Таймер выключается до удаления файла юнита: иначе systemd оставит
 # висеть symlink в multi-user.target.wants и будет ругаться при каждом
 # daemon-reload.
-if zl_systemd_ok; then
+if zl_manage_systemd; then
 	run systemctl disable --now zapret-lite-check-update.timer >/dev/null 2>&1 || true
 fi
 run rm -f "$ZL_SYSTEMD_DIR/zapret-lite-check-update.service" \
@@ -105,7 +105,7 @@ run rmdir "$ZL_SYSTEMD_DIR/zapret.service.d" 2>/dev/null || true
 # На случай, если раньше ставился install_easy.sh апстрима.
 run rm -f "$ZL_SYSTEMD_DIR/zapret-list-update.service" \
           "$ZL_SYSTEMD_DIR/zapret-list-update.timer"
-[ "$DRY_RUN" = 1 ] || systemctl daemon-reload
+[ "$DRY_RUN" = 1 ] || ! zl_manage_systemd || systemctl daemon-reload
 zl_info "юниты удалены"
 
 # =====================================================================
