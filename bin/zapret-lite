@@ -1,0 +1,553 @@
+#!/bin/sh
+# shellcheck disable=SC3043,SC1091  # local есть в dash/ash/bash; lib подключается в рантайме
+# Менеджер zapret-lite.
+#
+#   zapret-lite status
+#   zapret-lite list
+#   zapret-lite use <стратегия>
+#   zapret-lite generations
+#   zapret-lite rollback [поколение]
+#   zapret-lite ipset [loaded|none|any]
+#   zapret-lite game-filter [disabled|all]
+#   zapret-lite ipv6 [on|off]
+#   zapret-lite doctor
+#   zapret-lite check-update
+#   zapret-lite restart
+#
+# Операции, меняющие состояние, требуют root. Чтение - нет.
+# Обновление - это запуск install.sh из нового комплекта, отдельной
+# команды для него нет намеренно: два пути установки означали бы два
+# набора ошибок.
+
+set -eu
+
+ZL_LIB="${ZL_LIB:-/opt/zapret-lite/lib}"
+# shellcheck source=lib/common.sh
+. "$ZL_LIB/common.sh"
+
+usage() {
+	# Печатается шапка файла до первой пустой строки после неё.
+	# Диапазон строк не зашит: он разъезжается при любой правке.
+	sed -n '3,/^$/p' "$0" | sed -e 's/^#\{1,\} \{0,1\}//' -e 's/^#$//'
+}
+
+# Списки перечитываются nfqws по mtime (hostlist.c:208, ipset.c:193),
+# поэтому смена режима ipset или правка списков рестарта НЕ требуют.
+# Рестарт нужен там, где меняются порты в правилах firewall.
+restart_service() {
+	zl_systemd_ok || {
+		zl_warn "systemd недоступен, перезапустите zapret вручную"
+		return 0
+	}
+	systemctl is-enabled --quiet zapret 2>/dev/null || {
+		zl_warn "служба zapret не включена"
+		return 0
+	}
+	if systemctl restart zapret; then
+		zl_info "служба перезапущена"
+	else
+		zl_error "перезапуск не удался. Смотрите: journalctl -u zapret -n 50"
+		return 1
+	fi
+}
+
+read_state() {
+	# $1 - файл, $2 - значение по умолчанию
+	if [ -r "$1" ]; then
+		read -r _v <"$1" && printf '%s\n' "$_v"
+	else
+		printf '%s\n' "$2"
+	fi
+}
+
+current_strategy() { read_state "$ZL_ETC/strategy" ""; }
+
+# --- команды ----------------------------------------------------------
+
+cmd_list() {
+	local cur f b
+	cur=$(current_strategy)
+	[ -d "$ZL_CURRENT/strategies" ] || zl_die "нет текущего поколения"
+	for f in "$ZL_CURRENT"/strategies/*.conf; do
+		[ -e "$f" ] || continue
+		b=$(basename "$f" .conf)
+		if [ "$b" = "$cur" ]; then
+			printf '  * %s\n' "$b"
+		else
+			printf '    %s\n' "$b"
+		fi
+	done
+}
+
+cmd_status() {
+	local gen prev strat mode game fw active
+
+	gen=$(zl_generation_current 2>/dev/null) || gen="(нет)"
+	prev=$(zl_generation_previous 2>/dev/null) || prev="(нет)"
+	strat=$(current_strategy)
+	mode=$(read_state "$ZL_ETC/ipset.mode" loaded)
+	game=$(read_state "$ZL_ETC/game-filter.mode" disabled)
+	fw=$(zl_detect_fwtype)
+
+	if zl_systemd_ok && systemctl is-active --quiet zapret 2>/dev/null; then
+		active="работает"
+	else
+		active="остановлена"
+	fi
+
+	printf 'Служба        : %s\n' "$active"
+	printf 'Стратегия     : %s\n' "${strat:-(не выбрана)}"
+	printf 'Поколение     : %s\n' "$gen"
+	printf 'Предыдущее    : %s\n' "$prev"
+	printf 'Firewall      : %s\n' "${fw:-не определён}"
+	printf 'Режим ipset   : %s\n' "$mode"
+	printf 'Игровой фильтр: %s\n' "$game"
+	printf 'IPv6          : %s\n' "$(read_state "$ZL_ETC/ipv6.mode" off)"
+
+	if [ -r "$ZL_CURRENT/flowseal.lock" ]; then
+		printf 'Списки от     : flowseal %s (синхронизировано %s)\n' \
+			"$(zl_lock_get "$ZL_CURRENT/flowseal.lock" flowseal_version)" \
+			"$(zl_lock_get "$ZL_CURRENT/flowseal.lock" synced_utc)"
+	fi
+
+	# Пустой include-лист снимает фильтрацию по хостам целиком
+	# (hostlist.c:243), поэтому предупреждаем заранее.
+	for f in list-general-user.txt list-exclude-user.txt; do
+		if [ -f "$ZL_ETC/lists/$f" ] && [ ! -s "$ZL_ETC/lists/$f" ]; then
+			zl_warn "$f пуст - это может снять фильтрацию по доменам"
+		fi
+	done
+
+	if [ "$prev" != "(нет)" ]; then
+		printf '\nЕсли что-то сломалось: zapret-lite rollback\n'
+	fi
+}
+
+cmd_generations() {
+	local cur prev g mark
+	cur=$(zl_generation_current 2>/dev/null) || cur=
+	prev=$(zl_generation_previous 2>/dev/null) || prev=
+
+	zl_generation_list | while read -r g; do
+		mark="  "
+		[ "$g" = "$prev" ] && mark="- "
+		[ "$g" = "$cur" ] && mark="* "
+		printf '%s%s\n' "$mark" "$g"
+	done
+	printf '\n  * текущее   - предыдущее (цель для rollback)\n'
+}
+
+cmd_use() {
+	local name
+	name="${1:?укажите стратегию: zapret-lite use <имя>}"
+	zl_require_root
+	zl_valid_name "$name" || zl_die "недопустимое имя: $name"
+	[ -r "$ZL_CURRENT/strategies/$name.conf" ] \
+		|| zl_die "нет стратегии '$name' в текущем поколении. Список: zapret-lite list"
+
+	printf '%s\n' "$name" >"$ZL_ETC/strategy"
+	chmod 0644 "$ZL_ETC/strategy"
+	zl_info "выбрана стратегия: $name"
+	# Смена стратегии меняет NFQWS_PORTS_*, а значит и правила firewall.
+	restart_service
+}
+
+cmd_rollback() {
+	local target cur strat
+	cur=$(zl_generation_current 2>/dev/null) || cur=
+
+	if [ $# -gt 0 ]; then
+		target="$1"
+	else
+		target=$(zl_generation_previous 2>/dev/null) \
+			|| zl_die "нет предыдущего поколения. Список: zapret-lite generations"
+	fi
+
+	zl_require_root
+	zl_valid_name "$target" || zl_die "недопустимое имя поколения: $target"
+	[ "$target" = "$cur" ] && zl_die "поколение $target уже текущее"
+
+	zl_info "откат: $cur -> $target"
+	zl_generation_switch "$target" || exit 1
+
+	# Списки и фейки поехали назад вместе с поколением, значит и
+	# ipset-all.txt надо пересобрать из источника отката.
+	zl_apply_ipset_mode >/dev/null || exit 1
+	zl_info "ipset-all.txt пересобран из $target"
+
+	# Стратегия могла существовать только в новой версии.
+	strat=$(current_strategy)
+	if [ -n "$strat" ] && [ ! -r "$ZL_CURRENT/strategies/$strat.conf" ]; then
+		zl_warn "стратегии '$strat' нет в поколении $target."
+		zl_warn "Выберите другую: zapret-lite list && zapret-lite use <имя>"
+	fi
+
+	restart_service
+	zl_info "откат завершён. Вернуться: zapret-lite rollback $cur"
+}
+
+cmd_ipset() {
+	local mode
+	if [ $# -eq 0 ]; then
+		printf 'Текущий режим: %s\n' "$(read_state "$ZL_ETC/ipset.mode" loaded)"
+		cat <<'EOF'
+
+  loaded  список подсетей из flowseal активен (по умолчанию)
+  none    заглушка: ipset-профили не срабатывают
+  any     пустой список: ipset-профили ловят любые адреса
+EOF
+		return 0
+	fi
+
+	mode="$1"
+	case "$mode" in
+		loaded|none|any) ;;
+		*) zl_die "режим должен быть loaded, none или any" ;;
+	esac
+
+	zl_require_root
+	printf '%s\n' "$mode" >"$ZL_ETC/ipset.mode"
+	chmod 0644 "$ZL_ETC/ipset.mode"
+	zl_apply_ipset_mode >/dev/null || exit 1
+	zl_info "режим ipset: $mode"
+	# Рестарт не нужен: nfqws перечитает файл по mtime.
+	zl_info "перезапуск не требуется, nfqws подхватит список сам"
+}
+
+cmd_game_filter() {
+	local mode
+	if [ $# -eq 0 ]; then
+		printf 'Текущий режим: %s\n' "$(read_state "$ZL_ETC/game-filter.mode" disabled)"
+		cat <<'EOF'
+
+  disabled  игровой трафик не обрабатывается (по умолчанию)
+  all       порты 1024-65535 по TCP и UDP
+EOF
+		return 0
+	fi
+
+	mode="$1"
+	case "$mode" in
+		disabled|all) ;;
+		*) zl_die "режим должен быть disabled или all" ;;
+	esac
+
+	zl_require_root
+	printf '%s\n' "$mode" >"$ZL_ETC/game-filter.mode"
+	chmod 0644 "$ZL_ETC/game-filter.mode"
+	zl_info "игровой фильтр: $mode"
+	# Меняет NFQWS_PORTS_*, значит меняет правила firewall.
+	restart_service
+}
+
+
+cmd_ipv6() {
+	local mode
+	if [ $# -eq 0 ]; then
+		printf 'Текущий режим: %s\n' "$(read_state "$ZL_ETC/ipv6.mode" off)"
+		cat <<'EOF'
+
+  off  трафик IPv6 не обрабатывается (по умолчанию, как у апстрима)
+  on   обрабатывается наравне с IPv4
+
+  Включать стоит, если у машины есть глобальный адрес IPv6: иначе часть
+  трафика к заблокированным ресурсам идёт мимо обхода.
+  Проверить: ip -6 addr show scope global
+EOF
+		return 0
+	fi
+
+	mode="$1"
+	case "$mode" in
+		on|off) ;;
+		*) zl_die "режим должен быть on или off" ;;
+	esac
+
+	zl_require_root
+	printf '%s\n' "$mode" >"$ZL_ETC/ipv6.mode"
+	chmod 0644 "$ZL_ETC/ipv6.mode"
+	zl_info "IPv6: $mode"
+	# Меняется набор правил firewall, значит нужен перезапуск.
+	restart_service
+}
+
+# --- диагностика ------------------------------------------------------
+
+DOCTOR_FAIL=0
+DOCTOR_WARN=0
+
+d_ok()   { printf '  [ + ] %s\n' "$*"; }
+d_warn() { printf '  [ ! ] %s\n' "$*"; DOCTOR_WARN=$((DOCTOR_WARN + 1)); }
+d_bad()  { printf '  [ - ] %s\n' "$*"; DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); }
+
+cmd_doctor() {
+	local gen strat fw n missing bin out mode p dis6
+
+	printf '\n--- Окружение\n'
+	if zl_systemd_ok; then
+		d_ok "systemd доступен"
+	else
+		d_bad "systemd не обнаружен"
+	fi
+
+	fw=$(zl_detect_fwtype)
+	if [ -n "$fw" ]; then
+		d_ok "firewall: $fw"
+	else
+		d_bad "не найдены ни nft, ни iptables"
+	fi
+
+	if [ -r /proc/net/netfilter/nfnetlink_queue ]; then
+		d_ok "модуль nfnetlink_queue загружен"
+	else
+		d_warn "nfnetlink_queue не виден. Обычно он подгружается при старте службы;
+        если служба не стартует, попробуйте: modprobe nfnetlink_queue"
+	fi
+
+	printf '\n--- Установка\n'
+	gen=$(zl_generation_current 2>/dev/null) || gen=
+	if [ -n "$gen" ]; then
+		d_ok "текущее поколение: $gen"
+		if zl_verify_manifest "$ZL_CURRENT" >/dev/null 2>&1; then
+			d_ok "манифест поколения сходится"
+		else
+			d_bad "манифест поколения НЕ сходится: файлы изменены или повреждены"
+		fi
+	else
+		d_bad "нет текущего поколения"
+	fi
+
+	if zl_shim_is_ours; then
+		d_ok "$ZL_ZAPRET_DIR/config не изменён вручную"
+	else
+		d_warn "$ZL_ZAPRET_DIR/config изменён вручную или создан не нами.
+        Правки принято держать в $ZL_ETC/local.conf"
+	fi
+
+	# install_bin.sh симлинкует выбранный бинарник сюда; именно этот путь
+	# использует init-скрипт (init.d/sysv/functions:77).
+	bin="$ZL_ZAPRET_DIR/nfq/nfqws"
+	if [ -x "$bin" ]; then
+		out=$("$bin" --version 2>&1 | head -1) || out=
+		d_ok "nfqws: ${out:-найден}"
+	else
+		d_bad "нет исполняемого $bin"
+	fi
+
+	printf '\n--- Конфигурация\n'
+	strat=$(current_strategy)
+	if [ -z "$strat" ]; then
+		d_bad "стратегия не выбрана"
+	elif ! zl_valid_name "$strat"; then
+		d_bad "недопустимое имя стратегии в $ZL_ETC/strategy: '$strat'"
+	elif [ -r "$ZL_CURRENT/strategies/$strat.conf" ]; then
+		d_ok "стратегия: $strat"
+	else
+		d_bad "стратегии '$strat' нет в текущем поколении"
+	fi
+
+	# Загружаем конфиг в подоболочке: он может выставить что угодно,
+	# и это не должно повлиять на сам doctor.
+	if [ -r "$ZL_ZAPRET_DIR/config" ]; then
+		missing=$(
+			# Конфиг читается init-скриптом без set -eu, и наш doctor
+			# не должен быть строже: иначе безобидная ссылка на пустую
+			# переменную в local.conf убьёт подоболочку, и проверка
+			# отрапортует успех, ничего не проверив.
+			set +eu
+			# shellcheck disable=SC1090,SC1091
+			. "$ZL_ZAPRET_DIR/config" 2>/dev/null
+			# shellcheck disable=SC2086
+			set -- $NFQWS_OPT
+			for a in "$@"; do
+				case "$a" in
+					*=/*) p=${a#*=}; [ -e "$p" ] || printf '%s\n' "$p" ;;
+				esac
+			done
+		)
+		if [ -z "$missing" ]; then
+			d_ok "все файлы, на которые ссылается стратегия, существуют"
+		else
+			n=$(printf '%s\n' "$missing" | wc -l)
+			d_bad "не найдено файлов: $n"
+			printf '%s\n' "$missing" | sed 's/^/        /'
+		fi
+
+		# Настоящая проверка: сам nfqws разбирает опции и говорит да/нет.
+		if [ -x "$bin" ]; then
+			if (
+				set +eu
+				# shellcheck disable=SC1090,SC1091
+				. "$ZL_ZAPRET_DIR/config" 2>/dev/null
+				# shellcheck disable=SC2086
+				"$bin" --dry-run --qnum=200 $NFQWS_OPT >/dev/null 2>&1
+			); then
+				d_ok "nfqws --dry-run: опции корректны"
+			else
+				d_bad "nfqws --dry-run отверг опции стратегии"
+			fi
+		fi
+	else
+		d_bad "нет $ZL_ZAPRET_DIR/config"
+	fi
+
+	# IPv6 обрабатывается, только если DISABLE_IPV6 не равен 1. На
+	# двустековом подключении выключенная обработка выглядит как
+	# неработающая стратегия, поэтому предупреждаем заранее.
+	if [ -r "$ZL_ZAPRET_DIR/config" ]; then
+		dis6=$(
+			set +eu
+			# shellcheck disable=SC1090,SC1091
+			. "$ZL_ZAPRET_DIR/config" 2>/dev/null
+			printf '%s' "${DISABLE_IPV6:-}"
+		)
+		if [ "$dis6" = 1 ] && ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
+			d_warn "у машины есть глобальный IPv6, но обработка выключена:
+        часть трафика идёт мимо обхода. Включить: sudo zapret-lite ipv6 on"
+		elif [ "$dis6" != 1 ]; then
+			d_ok "обработка IPv6 включена"
+		fi
+	fi
+
+	printf '\n--- Списки\n'
+	mode=$(read_state "$ZL_ETC/ipset.mode" loaded)
+	d_ok "режим ipset: $mode"
+	for f in list-general-user.txt list-exclude-user.txt; do
+		if [ ! -e "$ZL_ETC/lists/$f" ]; then
+			d_bad "нет $ZL_ETC/lists/$f"
+		elif [ ! -s "$ZL_ETC/lists/$f" ]; then
+			# hostlist.c:243 - если ВСЕ include-листы профиля пусты,
+			# фильтрация по доменам снимается целиком.
+			d_warn "$f пуст. Пустой include-лист может снять фильтрацию по доменам"
+		fi
+	done
+
+	# Файлы, которые читаются от root, не должны быть доступны на запись
+	# кому попало. Это единственная проверка в doctor, которая ловит не
+	# поломку, а возможность её устроить.
+	# Проверка имеет смысл только для настоящей установки. В префиксе
+	# (тесты, разбор проблем) файлы принадлежат тому, кто их создал, и
+	# ругаться на это - шум.
+	if [ "$(id -u)" = 0 ] && [ -z "$ZL_PREFIX" ]; then
+		for p in "$ZL_ETC" "$ZL_ETC/local.conf" "$ZL_ETC/strategy"; do
+			[ -e "$p" ] || continue
+			if zl_group_or_world_writable "$p"; then
+				d_bad "$p доступен на запись не только root"
+			fi
+			[ "$(stat -c '%U' "$p" 2>/dev/null)" = root ] \
+				|| d_bad "$p принадлежит не root"
+		done
+	fi
+
+	printf '\n--- Служба\n'
+	if zl_systemd_ok; then
+		if systemctl is-enabled --quiet zapret 2>/dev/null; then
+			d_ok "автозапуск включён"
+		else
+			d_warn "автозапуск выключен"
+		fi
+		if systemctl is-active --quiet zapret 2>/dev/null; then
+			d_ok "служба работает"
+		else
+			d_bad "служба не работает. Смотрите: journalctl -u zapret -n 50"
+		fi
+	fi
+
+	printf '\n--- Итог\n'
+	if [ "$DOCTOR_FAIL" -gt 0 ]; then
+		printf '  Проблем: %s, предупреждений: %s\n' "$DOCTOR_FAIL" "$DOCTOR_WARN"
+		return 1
+	fi
+	if [ "$DOCTOR_WARN" -gt 0 ]; then
+		printf '  Проблем нет, предупреждений: %s\n' "$DOCTOR_WARN"
+		return 0
+	fi
+	printf '  Всё в порядке\n'
+	return 0
+}
+
+# --- проверка обновлений ----------------------------------------------
+#
+# Только уведомление. Ничего не скачивается и не применяется: обновляться
+# имеет смысл тогда, когда что-то перестало работать, а не по расписанию.
+
+ZL_STATE="${ZL_STATE:-$ZL_PREFIX/var/lib/zapret-lite}"
+
+# Источник по умолчанию - релизы flowseal: он говорит, появились ли новые
+# стратегии вообще. Если у вас есть собственный репозиторий сборок,
+# положите его API-адрес в $ZL_ETC/update.url, и проверка будет смотреть
+# на него.
+ZL_UPDATE_URL_DEFAULT=https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest
+if [ -z "${ZL_UPDATE_URL:-}" ] && [ -r "$ZL_ETC/update.url" ]; then
+	read -r ZL_UPDATE_URL <"$ZL_ETC/update.url"
+fi
+ZL_UPDATE_URL="${ZL_UPDATE_URL:-$ZL_UPDATE_URL_DEFAULT}"
+
+cmd_check_update() {
+	local have latest body
+	have=$(zl_lock_get "$ZL_CURRENT/flowseal.lock" flowseal_version 2>/dev/null) || have=
+
+	zl_have curl || zl_die "нужен curl"
+
+	body=$(curl -sS --fail --location --max-redirs 3 --max-time 20 \
+	            "$ZL_UPDATE_URL" 2>/dev/null) || {
+		zl_warn "не удалось проверить обновления (сеть или источник недоступны)"
+		return 0
+	}
+	latest=$(printf '%s' "$body" | sed -n 's/.*"tag_name"[ ]*:[ ]*"\([^"]*\)".*/\1/p' | head -1)
+
+	# Ответ приходит из сети и попадает в файл состояния и на экран,
+	# поэтому принимаем только безобидный набор символов.
+	case "$latest" in
+		""|*[!A-Za-z0-9._-]*)
+			zl_warn "источник вернул неожиданный ответ, проверка пропущена"
+			return 0
+			;;
+	esac
+
+	mkdir -p "$ZL_STATE"
+	printf 'checked=%s\nhave=%s\nlatest=%s\n' \
+		"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$have" "$latest" \
+		>"$ZL_STATE/update-check"
+	chmod 0644 "$ZL_STATE/update-check"
+
+	if [ "$have" = "$latest" ]; then
+		zl_info "установлена актуальная версия flowseal ($have)"
+		return 0
+	fi
+
+	cat <<EOF
+[ ! ] Доступна новая версия списков и стратегий: $latest (у вас $have)
+
+  Обновляться стоит, если что-то перестало работать. Если всё работает,
+  можно ничего не делать.
+
+  Обновление: скачайте релиз zapret-lite и запустите его install.sh.
+  Ваши списки, стратегия и настройки сохранятся, а прежнее состояние
+  останется доступным через: zapret-lite rollback
+EOF
+	return 0
+}
+
+# --- разбор аргументов ------------------------------------------------
+
+[ $# -gt 0 ] || { usage; exit 1; }
+
+cmd="$1"
+shift
+
+case "$cmd" in
+	status)       cmd_status "$@" ;;
+	list)         cmd_list "$@" ;;
+	use)          cmd_use "$@" ;;
+	generations)  cmd_generations "$@" ;;
+	rollback)     cmd_rollback "$@" ;;
+	ipset)        cmd_ipset "$@" ;;
+	game-filter)  cmd_game_filter "$@" ;;
+	ipv6)         cmd_ipv6 "$@" ;;
+	doctor)       cmd_doctor "$@" ;;
+	check-update) cmd_check_update "$@" ;;
+	restart)      zl_require_root; restart_service ;;
+	-h|--help|help) usage ;;
+	*) zl_die "неизвестная команда: $cmd (см. --help)" ;;
+esac

@@ -1,0 +1,154 @@
+name: release
+
+# Собирает самодостаточный архив: наши скрипты, данные flowseal и
+# бинарники zapret под три архитектуры.
+#
+# Самодостаточность здесь не про удобство. github.com вполне может
+# оказаться заблокирован ровно у того, кому нужен обход, и установщик,
+# который на середине лезет в сеть за zapret, встанет именно там, где
+# должен был помочь.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Взять бинарники zapret из официального релиза
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          ZAPRET_REF=$(sed -n 's/^zapret_ref=//p' vendor/zapret/zapret.lock)
+          ZAPRET_VER=$(sed -n 's/^zapret_version=//p' vendor/zapret/zapret.lock)
+          if [ "$ZAPRET_REF" = FILL_ME ]; then
+            echo "::error::vendor/zapret/zapret.lock: заполните zapret_ref"
+            exit 1
+          fi
+
+          # Бинарники берём у автора, а не собираем сами: он публикует
+          # статические musl-сборки под все архитектуры, включая arm64 и
+          # armv7. Своя кросс-сборка дала бы худший результат и только
+          # хост-архитектуру.
+          mkdir -p /tmp/zp && cd /tmp/zp
+          gh release download "v$ZAPRET_VER" --repo bol-van/zapret \
+             --pattern "zapret-v$ZAPRET_VER.tar.gz" --pattern sha256sum.txt
+
+          tar -xzf "zapret-v$ZAPRET_VER.tar.gz"
+
+          # sha256sum.txt перечисляет файлы ВНУТРИ архива, с путями вида
+          # "zapret-v72.13/binaries/linux-arm64/nfqws". Поэтому проверка
+          # запускается из каталога, куда распакован архив, а не изнутри
+          # него и не по самому архиву. На v72.13 это 74 записи.
+          sha256sum -c sha256sum.txt >verify.log 2>&1 || {
+            echo "::error::контрольные суммы zapret не сошлись"
+            grep -v ': OK$' verify.log | head -20
+            exit 1
+          }
+          echo "проверено файлов: $(grep -c ': OK$' verify.log)"
+
+          # Бинарник сам сообщает коммит, из которого собран:
+          #   github version v72.13 (87e0586...)
+          # Это прямее и надёжнее, чем сверять дерево исходников: тег
+          # можно передвинуть, а эта строка вшита в сам файл.
+          got=$("zapret-v$ZAPRET_VER/binaries/linux-x86_64/nfqws" --version 2>&1 | head -1)
+          echo "$got"
+          case "$got" in
+            *"$ZAPRET_REF"*) echo "коммит совпадает с пином" ;;
+            *)
+              echo "::error::бинарник собран не из $ZAPRET_REF"
+              exit 1
+              ;;
+          esac
+
+          echo "ZAPRET_SRC=/tmp/zp/zapret-v$ZAPRET_VER" >> "$GITHUB_ENV"
+          echo "ZAPRET_VER=$ZAPRET_VER" >> "$GITHUB_ENV"
+
+      - name: Собрать комплект
+        run: |
+          # По тегу - версия из тега. По кнопке тега нет, поэтому имя
+          # строится из даты и короткого хеша: такой комплект нужен для
+          # проверки, а не для публикации.
+          if [ "${GITHUB_REF_TYPE:-}" = tag ]; then
+            NAME="zapret-lite-${GITHUB_REF_NAME#v}"
+          else
+            NAME="zapret-lite-$(date -u +%Y%m%d)-${GITHUB_SHA:0:7}"
+          fi
+          mkdir -p "dist/$NAME"
+          cp -r bin lib config systemd strategies vendor tools \
+                install.sh uninstall.sh README.md docs LICENSE \
+                "dist/$NAME/"
+          # Апстримный zapret едет целиком, кроме того, что нам не нужно
+          # и что только сбивает с толку в дереве установки.
+          mkdir -p "dist/$NAME/zapret"
+          ( cd "$ZAPRET_SRC" && tar -cf - \
+              --exclude=./.git --exclude=./docs --exclude=./config \
+              --exclude=./init.d/openwrt --exclude=./init.d/openwrt-minimal \
+              --exclude=./init.d/pfsense --exclude=./files/huawei \
+              . ) | tar -xf - -C "dist/$NAME/zapret"
+          cp vendor/zapret/zapret.lock "dist/$NAME/zapret/zapret.lock"
+
+          # Манифест комплекта: покрывает всё, включая strategies/*.conf
+          # (shell-код, читаемый от root) и бинарники zapret.
+          python3 tools/make-package-manifest.py "dist/$NAME"
+
+          # Проверяем то, что реально нужно установщику: каталоги
+          # архитектур на месте и среди них есть x86_64 и arm64.
+          test -d "dist/$NAME/zapret/binaries/linux-x86_64"
+          test -d "dist/$NAME/zapret/binaries/linux-arm64"
+          ls "dist/$NAME/zapret/binaries"
+          # Самопроверка: манифест должен сходиться до упаковки.
+          python3 tools/make-package-manifest.py "dist/$NAME" --check
+          ( cd dist && tar -czf "$NAME.tar.gz" "$NAME" )
+          ( cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+
+      - name: Проверить, что комплект ставится
+        run: |
+          sudo apt-get install -y -qq bats
+          # Установка в префикс: то же, что делают тесты, но уже на
+          # собранном архиве, а не на дереве репозитория.
+          tar -xzf "dist/$NAME.tar.gz" -C /tmp
+          sudo mkdir -p /run/systemd/system
+          ZL_PREFIX=/tmp/testroot sh "/tmp/$NAME/install.sh" \
+            --strategy general --dry-run
+
+      # Запуск по кнопке даёт артефакт, а не релиз: собрать и проверить
+      # комплект нужно уметь, не публикуя его.
+      - name: Выложить артефакт (запуск по кнопке)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: |
+            dist/${{ env.NAME }}.tar.gz
+            dist/${{ env.NAME }}.tar.gz.sha256
+          retention-days: 14
+
+      - name: Опубликовать релиз (только по тегу)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/${{ env.NAME }}.tar.gz
+            dist/${{ env.NAME }}.tar.gz.sha256
+          body: |
+            Самодостаточный комплект: zapret ${{ env.ZAPRET_VER }},
+            стратегии и списки flowseal, установщик и менеджер.
+
+            Установка:
+
+                tar -xzf ${{ env.NAME }}.tar.gz
+                cd ${{ env.NAME }}
+                sudo ./install.sh
+
+            Обновление с сохранением настроек - тот же `install.sh`.
+            Откат на прежнее состояние - `zapret-lite rollback`.

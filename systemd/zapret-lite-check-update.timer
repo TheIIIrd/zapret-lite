@@ -1,0 +1,14 @@
+[Unit]
+Description=Ежедневная проверка обновлений zapret-lite
+
+[Timer]
+OnCalendar=daily
+# Отработать после включения машины, если срок пропущен: ноутбук ночью
+# выключен, а без этого проверка не случится никогда.
+Persistent=true
+# Не бить в GitHub всем скопом в одну секунду.
+RandomizedDelaySec=4h
+Unit=zapret-lite-check-update.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,48 @@
+[Unit]
+Description=Проверка обновлений zapret-lite
+Documentation=https://github.com/TheIIIrd/zapret-lite
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/zapret-lite check-update
+
+# Ничего не применяет: сходить в сеть за номером версии и записать
+# один файл состояния. Поэтому здесь можно то, что для zapret.service
+# невозможно - он поднимает правила firewall и требует root.
+DynamicUser=yes
+StateDirectory=zapret-lite
+StateDirectoryMode=0755
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+UMask=0077
+
+# Читать нужно только текущее поколение (там номер установленной версии)
+# и настройку источника обновлений.
+ReadOnlyPaths=/opt/zapret-lite /etc/zapret-lite
+
+TimeoutStartSec=60s
