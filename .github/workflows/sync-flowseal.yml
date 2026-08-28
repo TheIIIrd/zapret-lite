@@ -1,0 +1,166 @@
+name: sync-flowseal
+
+# Два независимых расписания слиты в один workflow с развилкой:
+#   - релизы flowseal выходят раз в 1-3 недели и несут стратегии и .bin
+#   - списки правятся в main заметно чаще и меняются сами по себе
+#
+# Ничего не мержится автоматически. Workflow только готовит Pull Request:
+# человек в середине - единственное, что стоит между чужим репозиторием
+# и файлом, который читается с правами root.
+
+on:
+  schedule:
+    # Дважды в неделю: чаще нет смысла, реже - отстанем от списков.
+    - cron: '17 4 * * 1,4'
+  workflow_dispatch:
+    inputs:
+      what:
+        description: 'что синхронизировать'
+        required: true
+        default: 'both'
+        type: choice
+        options: [release, lists, both]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    if: >
+      github.event_name == 'schedule' ||
+      inputs.what == 'release' || inputs.what == 'both'
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.upstream.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Узнать последний релиз flowseal
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view --repo Flowseal/zapret-discord-youtube \
+                  --json tagName -q .tagName)
+          case "$tag" in
+            ''|*[!A-Za-z0-9._-]*)
+              echo "неожиданный тег: $tag" >&2; exit 1 ;;
+          esac
+          have=$(sed -n 's/^flowseal_version=//p' vendor/flowseal/flowseal.lock)
+          echo "tag=$tag"   >> "$GITHUB_OUTPUT"
+          echo "have=$have" >> "$GITHUB_OUTPUT"
+          if [ "$tag" = "$have" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "у нас $have, у flowseal $tag"
+
+      - name: Скачать и распаковать релиз
+        if: steps.upstream.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/rel
+          gh release download "${{ steps.upstream.outputs.tag }}" \
+            --repo Flowseal/zapret-discord-youtube --archive=zip \
+            --output /tmp/rel.zip
+          unzip -q /tmp/rel.zip -d /tmp/rel
+          # В архиве один каталог верхнего уровня.
+          inner=$(find /tmp/rel -mindepth 1 -maxdepth 1 -type d | head -1)
+          echo "RELEASE_DIR=$inner" >> "$GITHUB_ENV"
+
+      - name: Пересобрать vendor и стратегии
+        if: steps.upstream.outputs.changed == 'true'
+        run: |
+          ZVER=$(sed -n 's/^zapret_version=//p' vendor/zapret/zapret.lock)
+          python3 tools/vendor-sync.py "$RELEASE_DIR" vendor \
+            --version "${{ steps.upstream.outputs.tag }}" \
+            --zapret-version "$ZVER"
+          rm -f strategies/*.conf
+          python3 tools/import-strategies.py "$RELEASE_DIR" strategies
+
+      - name: Сводка изменений для описания PR
+        if: steps.upstream.outputs.changed == 'true'
+        id: summary
+        run: |
+          {
+            echo 'body<<PR_EOF'
+            echo "Синхронизация с flowseal \
+          \`${{ steps.upstream.outputs.have }}\` -> \
+          \`${{ steps.upstream.outputs.tag }}\`."
+            echo
+            echo '### Стратегии'
+            git status --porcelain strategies/ | sed 's/^/    /' || true
+            echo
+            echo '### Данные'
+            git status --porcelain vendor/ | sed 's/^/    /' || true
+            echo
+            echo '> Проверьте изменения перед мержем. CI подтверждает, что'
+            echo '> стратегии разбираются движком nfqws и что ссылки на'
+            echo '> файлы не битые, но не проверяет, что обход работает.'
+            echo PR_EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Открыть Pull Request
+        if: steps.upstream.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: sync/flowseal-${{ steps.upstream.outputs.tag }}
+          title: 'sync: flowseal ${{ steps.upstream.outputs.tag }}'
+          body: ${{ steps.summary.outputs.body }}
+          commit-message: 'sync: flowseal ${{ steps.upstream.outputs.tag }}'
+          labels: sync
+          delete-branch: true
+
+  lists:
+    # Списки живут в main у flowseal и обновляются чаще релизов.
+    #
+    # Job идёт ПОСЛЕ sync и пропускается, если тот нашёл новый релиз:
+    # иначе оба правили бы vendor/flowseal параллельно, и PR со списками
+    # из main откатил бы списки, только что приехавшие с релизом.
+    needs: sync
+    if: >
+      always() &&
+      needs.sync.result != 'failure' &&
+      needs.sync.outputs.changed != 'true' &&
+      (github.event_name == 'schedule' ||
+       inputs.what == 'lists' || inputs.what == 'both')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Обновить ipset-all и хостлисты из main
+        run: |
+          base=https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main
+          tmp=$(mktemp -d)
+          # ipset-service.txt - тот же файл, что в релизе лежит как
+          # ipset-all.txt.backup, но обновляется независимо от релизов.
+          curl -sS --fail --max-time 60 \
+            "$base/.service/ipset-service.txt" \
+            -o vendor/flowseal/lists/ipset-all.full.txt
+          for f in list-general.txt list-google.txt list-exclude.txt \
+                   ipset-exclude.txt; do
+            curl -sS --fail --max-time 60 "$base/lists/$f" -o "$tmp/$f" \
+              && cp "$tmp/$f" "vendor/flowseal/lists/$f"
+          done
+          # Манифест пересчитывается: он и есть то, что проверяет установщик.
+          cd vendor/flowseal
+          find . -type f ! -name MANIFEST.sha256 -printf '%P\n' | sort \
+            | xargs sha256sum > ../m.tmp
+          mv ../m.tmp MANIFEST.sha256
+
+      - name: Открыть Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: sync/flowseal-lists
+          title: 'sync: списки flowseal'
+          body: |
+            Обновление хостлистов и ipset-all из main у flowseal.
+
+            Только данные: стратегии и фейковые пейлоады не затронуты.
+            Если изменений нет, PR не создаётся.
+          commit-message: 'sync: списки flowseal'
+          labels: sync
+          delete-branch: true

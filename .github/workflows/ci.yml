@@ -1,0 +1,216 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Первым делом: всё ли вообще доехало до репозитория. Один
+      # недостающий каталог иначе превращается в полсотни непонятных
+      # падений в других job. Классический случай - шаблон .gitignore
+      # для Python, в котором есть строка "lib/".
+      - name: Репозиторий полный
+        run: |
+          missing=0
+          for p in install.sh uninstall.sh bin/zapret-lite lib/common.sh \
+                   config/base.conf.in config/zapret-config.shim.in \
+                   systemd/10-zapret-lite.conf tools/import-strategies.py \
+                   tools/vendor-sync.py tools/nfqws-options.txt \
+                   tests/helper.bash vendor/zapret/zapret.lock \
+                   vendor/flowseal/MANIFEST.sha256; do
+            [ -e "$p" ] || { echo "::error::в репозитории нет $p"; missing=1; }
+          done
+          for d in strategies vendor/flowseal/fake vendor/flowseal/lists; do
+            [ -d "$d" ] && [ -n "$(ls -A "$d")" ] \
+              || { echo "::error::каталог $d пуст или отсутствует"; missing=1; }
+          done
+          if [ "$missing" = 1 ]; then
+            echo "::error::Проверьте .gitignore: git check-ignore -v <путь>"
+            exit 1
+          fi
+          echo "все обязательные файлы на месте"
+
+      - name: Установить shellcheck
+        # Версия зафиксирована: у shellcheck разные версии находят разное,
+        # и «чисто локально, красно в CI» - потерянное время. Пакет из
+        # apt плавает вместе с образом runner.
+        run: |
+          ver=v0.10.0
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/$ver/shellcheck-$ver.linux.x86_64.tar.xz" \
+            | tar -xJf - --strip-components=1 -C /usr/local/bin "shellcheck-$ver/shellcheck"
+          shellcheck --version
+
+      - name: shellcheck
+        # SC2329 отключён: функции вызываются через case по имени команды,
+        # и shellcheck считает их неиспользуемыми.
+        # --severity=warning: замечания уровня info (вроде SC2015 про
+        # A && B || C) полезны, но валить из-за них сборку не стоит.
+        run: |
+          shellcheck -x -s sh -e SC2329 --severity=warning \
+            install.sh uninstall.sh bin/zapret-lite lib/common.sh tests/vm-check.sh
+          echo "--- замечания уровня info (не влияют на результат):"
+          shellcheck -x -s sh -e SC2329 \
+            install.sh uninstall.sh bin/zapret-lite lib/common.sh || true
+
+      - name: Проверить синтаксис в dash
+        # Конфиги и init-скрипт zapret читаются через /bin/sh. На Debian
+        # и Ubuntu это dash, поэтому bash-измы должны падать здесь, а не
+        # у пользователя.
+        run: |
+          sudo apt-get install -y -qq dash
+          for f in install.sh uninstall.sh bin/zapret-lite lib/common.sh; do
+            dash -n "$f" || exit 1
+          done
+
+      - name: Проверить юниты systemd
+        run: |
+          sudo install -m755 bin/zapret-lite /usr/local/bin/zapret-lite
+          systemd-analyze verify systemd/zapret-lite-check-update.service
+          systemd-analyze verify systemd/zapret-lite-check-update.timer
+          mkdir -p /tmp/u/zapret.service.d
+          cp systemd/10-zapret-lite.conf /tmp/u/zapret.service.d/
+          printf '[Unit]\nDescription=t\n[Service]\nType=oneshot\nExecStart=/bin/true\n' \
+            > /tmp/u/zapret.service
+          systemd-analyze verify /tmp/u/zapret.service
+
+      - name: Python
+        run: |
+          python3 -m pip install --quiet ruff
+          # Без || true: замечания, которые никто не читает, - это шум,
+          # а не проверка.
+          ruff check tools/
+          python3 -m py_compile tools/*.py
+
+      - name: Манифест комплекта строится и сходится
+        run: |
+          rm -rf /tmp/pkg && mkdir -p /tmp/pkg
+          cp -r bin lib config systemd strategies vendor tools \
+                install.sh uninstall.sh /tmp/pkg/
+          python3 tools/make-package-manifest.py /tmp/pkg
+          python3 tools/make-package-manifest.py /tmp/pkg --check
+          # Подмена обязана обнаруживаться.
+          echo '# tampered' >> /tmp/pkg/strategies/general.conf
+          if python3 tools/make-package-manifest.py /tmp/pkg --check; then
+            echo "::error::подмена стратегии не обнаружена"; exit 1
+          fi
+
+  strategies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Собрать nfqws из запиненного zapret
+        # Нужен настоящий бинарник: единственная надёжная проверка
+        # стратегии - это её разбор самим движком через --dry-run.
+        run: |
+          sudo apt-get update -qq
+          # Список пакетов - тот, что называет сам апстрим
+          # (install_bin.sh:139). libmnl-dev обязателен: nfq/Makefile:16
+          # линкует -lmnl, и без него сборка падает на #include.
+          sudo apt-get install -y -qq make gcc zlib1g-dev libcap-dev \
+            libnetfilter-queue-dev libmnl-dev libsystemd-dev
+          ZAPRET_REF="$(sed -n 's/^zapret_ref=//p' vendor/zapret/zapret.lock)"
+          if [ "$ZAPRET_REF" = FILL_ME ]; then
+            echo "::error::vendor/zapret/zapret.lock: заполните zapret_ref"
+            echo "  git ls-remote https://github.com/bol-van/zapret refs/tags/v72.13"
+            exit 1
+          fi
+          git clone --quiet https://github.com/bol-van/zapret /tmp/zapret
+          git -C /tmp/zapret checkout --quiet "$ZAPRET_REF"
+          # Собираем из исходников, а не берём релизный бинарник: для
+          # --dry-run важно, чтобы движок соответствовал ровно тому
+          # коммиту, из которого порождён nfqws-options.txt.
+          echo "собран из $(git -C /tmp/zapret rev-parse HEAD)"
+          # Цель systemd, а не all: она добавляет -DUSE_SYSTEMD и
+          # sd_notify(READY=1), без которого Type=notify не работает
+          # (docs/readme.md, "Установка под systemd").
+          make -C /tmp/zapret systemd
+          test -x /tmp/zapret/binaries/my/nfqws
+          # make systemd складывает результат именно сюда, и этот же
+          # каталог install_bin.sh проверяет первым в ARCHLIST.
+          echo "NFQWS=/tmp/zapret/binaries/my/nfqws" >> "$GITHUB_ENV"
+
+      - name: Список опций совпадает с движком
+        # nfqws-options.txt порождается из исходников. Если он разъехался
+        # с запиненным zapret, конвертер валидирует по вчерашним данным.
+        run: |
+          sed -n '/static const struct option long_options\[\]/,/^};/p' \
+            /tmp/zapret/nfq/nfqws.c | grep -oP '\{"\K[a-z0-9-]+' \
+            | sort -u > /tmp/opts.txt
+          diff -u tools/nfqws-options.txt /tmp/opts.txt
+
+      - name: Каждая стратегия проходит nfqws --dry-run
+        run: |
+          fail=0
+          for f in strategies/*.conf; do
+            out=$(
+              ZAPRET_FAKE_DIR="$PWD/vendor/flowseal/fake"
+              ZAPRET_LISTS_DIR="$PWD/vendor/flowseal/lists"
+              ZAPRET_LOCAL_LISTS_DIR="$PWD/vendor/flowseal/lists"
+              GAME_FILTER_TCP=12
+              GAME_FILTER_UDP=12
+              # Пользовательские списки в репозитории не лежат: они
+              # создаются при установке. Для проверки хватает пустышек.
+              mkdir -p /tmp/ul
+              for u in list-general-user list-exclude-user ipset-exclude-user; do
+                printf 'example.invalid\n' > "/tmp/ul/$u.txt"
+              done
+              ZAPRET_LOCAL_LISTS_DIR=/tmp/ul
+              cp "$PWD"/vendor/flowseal/lists/ipset-all.full.txt /tmp/ul/ipset-all.txt
+              . "$f"
+              # shellcheck disable=SC2086
+              $NFQWS --dry-run --qnum=200 $NFQWS_OPT 2>&1
+            ) || { echo "[ - ] $f"; echo "$out" | tail -3; fail=1; }
+          done
+          [ "$fail" = 0 ] || exit 1
+          echo "[ + ] все стратегии приняты движком"
+
+      - name: Манифест vendor сходится
+        run: cd vendor/flowseal && sha256sum -c MANIFEST.sha256 --quiet
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить bats
+        run: |
+          # Сторонние репозитории на runner'ах GitHub периодически отдают
+          # 403 и валят apt-get update целиком. Нам они не нужны.
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list \
+                     /etc/apt/sources.list.d/azure*.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bats dash
+
+      - name: bats
+        # Тесты ставят всё в префикс, поэтому root не нужен и настоящая
+        # система не затрагивается.
+        run: bats tests/
+
+      - name: Пропущенные тесты
+        # Тест, который пропускается всегда и везде, - это отсутствующий
+        # тест с зелёной галочкой. Один такой уже находился: он не
+        # проверял то, что обещал названием. В CI (не root) должен
+        # пропускаться ровно один - тот, которому нужен обычный
+        # пользователь, и он здесь как раз выполняется.
+        run: |
+          bats tests/ 2>&1 | grep '# skip' || true
+          n=$(bats tests/ 2>&1 | grep -c '# skip' || true)
+          echo "пропущено: $n"
+          [ "$n" -le 1 ] || { echo "::error::слишком много пропусков"; exit 1; }
+
+      - name: Наборы тестов на месте
+        # Модульные тесты и тесты конвертера легко потерять при
+        # реорганизации, а без них сквозные пропускают целые классы
+        # дефектов.
+        run: |
+          for f in tests/lib.bats tests/converter.bats \
+                   tests/install.bats tests/manager.bats; do
+            [ -s "$f" ] || { echo "::error::нет $f"; exit 1; }
+          done
