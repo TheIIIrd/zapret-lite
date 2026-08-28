@@ -21,6 +21,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Нужна полная история: иначе не проверить, откуда тег.
+          fetch-depth: 0
+
+      - name: Тег стоит на коммите из main
+        # Тег можно поставить на что угодно, в том числе на коммит из
+        # unstable, который ещё не прошёл ревью. Публиковать такое как
+        # релиз нельзя, а заметить постфактум трудно.
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch --quiet origin main:refs/remotes/origin/main
+          if git merge-base --is-ancestor HEAD origin/main; then
+            echo "тег $GITHUB_REF_NAME указывает на коммит из main"
+          else
+            echo "::error::тег $GITHUB_REF_NAME не входит в main."
+            echo "::error::Сначала влейте изменения в main, потом ставьте тег."
+            exit 1
+          fi
 
       - name: Взять бинарники zapret из официального релиза
         env:
@@ -166,18 +184,39 @@ jobs:
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
+          # Тег с дефисом (v0.1.0-rc1, v0.2.0-beta) публикуется как
+          # предварительный: он не становится "latest" и не подсовывается
+          # тем, кто просто зашёл за свежей версией.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist/${{ env.NAME }}.tar.gz
             dist/${{ env.NAME }}.tar.gz.sha256
           body: |
             Самодостаточный комплект: zapret ${{ env.ZAPRET_VER }},
             стратегии и списки flowseal, установщик и менеджер.
+            Бинарники под 17 архитектур внутри, сеть при установке не нужна.
 
-            Установка:
+            ## Установка
 
                 tar -xzf ${{ env.NAME }}.tar.gz
                 cd ${{ env.NAME }}
                 sudo ./install.sh
 
-            Обновление с сохранением настроек - тот же `install.sh`.
-            Откат на прежнее состояние - `zapret-lite rollback`.
+            Если у машины есть глобальный IPv6, добавьте `--ipv6`.
+            Проверить: `ip -6 addr show scope global`.
+
+            ## Проверка скачанного
+
+                sha256sum -c ${{ env.NAME }}.tar.gz.sha256
+
+            Контрольная сумма подтверждает, что архив скачался целиком.
+            Подлинность она не доказывает: криптографической подписи у
+            проекта пока нет, единственный якорь доверия — HTTPS и эта
+            страница релизов.
+
+            ## Дальше
+
+            Обновление с сохранением настроек — тот же `install.sh` из
+            нового комплекта. Вернуться к прежнему состоянию —
+            `zapret-lite rollback`. Если что-то не работает —
+            `zapret-lite doctor`.

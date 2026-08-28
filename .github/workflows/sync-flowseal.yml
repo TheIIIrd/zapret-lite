@@ -20,10 +20,22 @@ on:
         default: 'both'
         type: choice
         options: [release, lists, both]
+      target:
+        description: 'в какую ветку открыть PR'
+        required: false
+        default: 'unstable'
+        type: string
 
 permissions:
   contents: write
   pull-requests: write
+
+# Ветка, куда приезжает синхронизация. Это unstable, а не main:
+# изменения от flowseal - такие же изменения, как любые другие, и
+# проходить они должны тем же путём, через unstable и ревью.
+# Ветка должна существовать, иначе checkout упадёт.
+env:
+  TARGET_BRANCH: ${{ inputs.target || 'unstable' }}
 
 jobs:
   sync:
@@ -35,6 +47,8 @@ jobs:
       changed: ${{ steps.upstream.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
 
       - name: Узнать последний релиз flowseal
         id: upstream
@@ -107,6 +121,7 @@ jobs:
         if: steps.upstream.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
+          base: ${{ env.TARGET_BRANCH }}
           branch: sync/flowseal-${{ steps.upstream.outputs.tag }}
           title: 'sync: flowseal ${{ steps.upstream.outputs.tag }}'
           body: ${{ steps.summary.outputs.body }}
@@ -130,6 +145,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
 
       - name: Обновить ipset-all и хостлисты из main
         run: |
@@ -154,6 +171,7 @@ jobs:
       - name: Открыть Pull Request
         uses: peter-evans/create-pull-request@v6
         with:
+          base: ${{ env.TARGET_BRANCH }}
           branch: sync/flowseal-lists
           title: 'sync: списки flowseal'
           body: |

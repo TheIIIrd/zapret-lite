@@ -25,11 +25,41 @@ firewall не совпадают со стратегиями, из-за чего
 
 ## Установка
 
+Готовый комплект берётся со страницы
+[Releases](../../releases/latest) — там архив и файл с контрольной
+суммой. Одной командой:
+
 ```sh
+REPO=<владелец>/zapret-lite
+URL=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+      | grep -oE '"browser_download_url":[[:space:]]*"[^"]*\.tar\.gz"' \
+      | cut -d'"' -f4)
+curl -fLO "$URL" && curl -fLO "$URL.sha256"
+sha256sum -c "$(basename "$URL").sha256"
+tar -xzf "$(basename "$URL")"
+cd "$(basename "$URL" .tar.gz)"
+sudo ./install.sh
+```
+
+Имя архива содержит версию, поэтому постоянной ссылки на «самый свежий»
+нет — её приходится узнавать у API. С установленным `gh` проще:
+
+```sh
+gh release download --repo <владелец>/zapret-lite --pattern '*.tar.gz*'
+```
+
+Если архив уже скачан вручную:
+
+```sh
+sha256sum -c zapret-lite-<версия>.tar.gz.sha256
 tar -xzf zapret-lite-<версия>.tar.gz
 cd zapret-lite-<версия>
 sudo ./install.sh
 ```
+
+Контрольная сумма подтверждает, что архив скачался целиком. Подлинность
+она не доказывает: криптографической подписи у проекта пока нет
+(см. [docs/security.md](docs/security.md)).
 
 Архив самодостаточный: бинарники zapret внутри, сеть при установке
 не нужна. Это намеренно — github.com может оказаться заблокирован ровно
