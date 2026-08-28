@@ -25,6 +25,8 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 STRATEGY=
 STRATEGY_EXPLICIT=0
 IPV6_MODE=
+FWTYPE_MODE=
+WAN_IFACE=
 DRY_RUN=0
 ZL_FORCE=0
 
@@ -35,6 +37,8 @@ usage() {
   --strategy ИМЯ   стратегия для активации (по умолчанию: general)
   --ipv6           обрабатывать также трафик IPv6
   --no-ipv6        не обрабатывать IPv6 (по умолчанию)
+  --fwtype ТИП     auto | iptables | nftables (по умолчанию auto)
+  --wan-iface ИМЯ  обрабатывать только этот интерфейс, "any" - все
   --force          перезаписать /opt/zapret/config, даже если он правлен руками
   --dry-run        показать, что будет сделано, ничего не менять
   --list           показать доступные стратегии и выйти
@@ -48,6 +52,10 @@ while [ $# -gt 0 ]; do
 		--strategy=*) STRATEGY="${1#*=}"; STRATEGY_EXPLICIT=1; shift ;;
 		--ipv6)    IPV6_MODE=on; shift ;;
 		--no-ipv6) IPV6_MODE=off; shift ;;
+		--fwtype)  FWTYPE_MODE="${2:?--fwtype требует аргумент}"; shift 2 ;;
+		--fwtype=*) FWTYPE_MODE="${1#*=}"; shift ;;
+		--wan-iface)  WAN_IFACE="${2:?--wan-iface требует аргумент}"; shift 2 ;;
+		--wan-iface=*) WAN_IFACE="${1#*=}"; shift ;;
 		--force)   ZL_FORCE=1; shift ;;
 		--dry-run) DRY_RUN=1; shift ;;
 		--list)
@@ -105,7 +113,7 @@ fi
 
 FWTYPE="$(zl_detect_fwtype)"
 [ -n "$FWTYPE" ] || zl_die "не найдены ни nft, ни iptables. Установите один из них."
-zl_info "firewall: $FWTYPE (переопределяется в $ZL_ETC/local.conf)"
+zl_info "firewall: $FWTYPE (определено; зафиксировать: --fwtype)"
 
 # Выбор стратегии - состояние пользователя. Обновление его не меняет:
 # без явного --strategy берём уже выбранную, и только при первой
@@ -377,6 +385,35 @@ fi
 
 # Материализация ipset-all.txt делается ПОСЛЕ переключения поколения:
 # источник берётся из current. См. секцию 7.
+
+# Тип firewall. Автоопределение zapret обычно право, но на машине, где
+# правила уже живут в iptables, выбор лучше зафиксировать.
+if [ -n "$FWTYPE_MODE" ]; then
+	case "$FWTYPE_MODE" in
+		auto|iptables|nftables) ;;
+		*) zl_die "--fwtype: допустимо auto, iptables или nftables" ;;
+	esac
+	run sh -c "echo '$FWTYPE_MODE' > '$ZL_ETC/fwtype'"
+	zl_info "тип firewall: $FWTYPE_MODE"
+elif [ -e "$ZL_ETC/fwtype" ]; then
+	zl_info "тип firewall: $(cat "$ZL_ETC/fwtype") (сохранено)"
+else
+	run sh -c "echo auto > '$ZL_ETC/fwtype'"
+fi
+
+# Ограничение по интерфейсу. Без него обрабатываются все, что на машине
+# с docker и парой мостов означает лишнюю работу.
+if [ -n "$WAN_IFACE" ]; then
+	case "$WAN_IFACE" in
+		*[!A-Za-z0-9._@:-\ ]*) zl_die "--wan-iface: недопустимое имя интерфейса" ;;
+	esac
+	run sh -c "echo '$WAN_IFACE' > '$ZL_ETC/wan-iface'"
+	zl_info "интерфейс: $WAN_IFACE"
+elif [ -e "$ZL_ETC/wan-iface" ]; then
+	zl_info "интерфейс: $(cat "$ZL_ETC/wan-iface") (сохранено)"
+else
+	run sh -c "echo any > '$ZL_ETC/wan-iface'"
+fi
 
 # IPv6. Апстримный install_easy.sh задаёт этот вопрос вслух; у нас это
 # флаг, а выбор сохраняется и переживает обновление.

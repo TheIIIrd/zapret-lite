@@ -64,6 +64,48 @@ case "$ZAPRET_GAME_FILTER_MODE" in
 esac
 
 
+# --- тип firewall ----------------------------------------------------
+#
+# По умолчанию auto: работает автоопределение самого zapret. Явный выбор
+# нужен там, где в системе есть и nft, и iptables, а правила уже живут
+# в одном из них - например, рядом с WireGuard.
+if [ -r "$ZAPRET_LITE_ETC/fwtype" ]; then
+	read ZAPRET_LITE_FWTYPE <"$ZAPRET_LITE_ETC/fwtype"
+else
+	ZAPRET_LITE_FWTYPE=auto
+fi
+
+case "$ZAPRET_LITE_FWTYPE" in
+	iptables|nftables) FWTYPE="$ZAPRET_LITE_FWTYPE" ;;
+	auto) ;;
+	*)
+		echo "zapret-lite: неизвестный тип firewall" \
+		     "'$ZAPRET_LITE_FWTYPE', используется автоопределение" >&2
+		ZAPRET_LITE_FWTYPE=auto
+		;;
+esac
+
+
+# --- ограничение по интерфейсу ---------------------------------------
+#
+# Без него zapret обрабатывает трафик на всех интерфейсах. На машине с
+# docker, WireGuard и парой мостов это лишняя работа, а иногда и вред:
+# правила цепляют трафик, которому обход не нужен.
+#
+# IFACE_WAN превращает правила nfqws в "oifname @wanif ..."
+# (common/nft.sh, _nft_fw_nfqws_post4), то есть ограничивает их одним
+# внешним интерфейсом. Несколько имён задаются через пробел.
+if [ -r "$ZAPRET_LITE_ETC/wan-iface" ]; then
+	read ZAPRET_LITE_WAN <"$ZAPRET_LITE_ETC/wan-iface"
+else
+	ZAPRET_LITE_WAN=any
+fi
+
+if [ -n "$ZAPRET_LITE_WAN" ] && [ "$ZAPRET_LITE_WAN" != any ]; then
+	IFACE_WAN="$ZAPRET_LITE_WAN"
+fi
+
+
 # --- умолчания zapret -------------------------------------------------
 #
 # Значения ниже совпадают с config.default апстрима и приведены явно,

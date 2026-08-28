@@ -10,6 +10,8 @@
 #   zapret-lite ipset [loaded|none|any]
 #   zapret-lite game-filter [disabled|all]
 #   zapret-lite ipv6 [on|off]
+#   zapret-lite fwtype [auto|iptables|nftables]
+#   zapret-lite wan-iface [имя|any]
 #   zapret-lite doctor
 #   zapret-lite check-update
 #   zapret-lite restart
@@ -103,6 +105,7 @@ cmd_status() {
 	printf 'Режим ipset   : %s\n' "$mode"
 	printf 'Игровой фильтр: %s\n' "$game"
 	printf 'IPv6          : %s\n' "$(read_state "$ZL_ETC/ipv6.mode" off)"
+	printf 'Интерфейс     : %s\n' "$(read_state "$ZL_ETC/wan-iface" any)"
 
 	if [ -r "$ZL_CURRENT/flowseal.lock" ]; then
 		printf 'Списки от     : flowseal %s (синхронизировано %s)\n' \
@@ -271,6 +274,74 @@ EOF
 	restart_service
 }
 
+cmd_fwtype() {
+	local mode
+	if [ $# -eq 0 ]; then
+		printf 'Текущий режим: %s\n' "$(read_state "$ZL_ETC/fwtype" auto)"
+		printf 'Определено сейчас: %s\n' "$(zl_detect_fwtype)"
+		cat <<'EOF'
+
+  auto      автоопределение самого zapret (по умолчанию)
+  iptables  зафиксировать iptables
+  nftables  зафиксировать nftables
+
+  Фиксировать стоит там, где есть и то, и другое, а ваши правила уже
+  живут в одном из них - например, рядом с WireGuard.
+EOF
+		return 0
+	fi
+
+	mode="$1"
+	case "$mode" in
+		auto|iptables|nftables) ;;
+		*) zl_die "режим должен быть auto, iptables или nftables" ;;
+	esac
+
+	zl_require_root
+	printf '%s\n' "$mode" >"$ZL_ETC/fwtype"
+	chmod 0644 "$ZL_ETC/fwtype"
+	zl_info "тип firewall: $mode"
+	# Меняется весь набор правил, причём в другой подсистеме.
+	restart_service
+}
+
+cmd_wan_iface() {
+	local iface
+	if [ $# -eq 0 ]; then
+		printf 'Текущий интерфейс: %s\n' "$(read_state "$ZL_ETC/wan-iface" any)"
+		printf 'Доступны: %s\n' \
+			"$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | tr '\n' ' ')"
+		cat <<'EOF'
+
+  any    обрабатывать все интерфейсы (по умолчанию)
+  <имя>  только указанный, например eth0
+
+  Несколько имён задаются через пробел в кавычках: "eth0 wlan0".
+  Полезно там, где много лишних интерфейсов - docker, мосты, VPN.
+EOF
+		return 0
+	fi
+
+	iface="$1"
+	case "$iface" in
+		"") zl_die "укажите имя интерфейса или any" ;;
+		*[!A-Za-z0-9._@:\ -]*) zl_die "недопустимое имя интерфейса: $iface" ;;
+	esac
+
+	zl_require_root
+	if [ "$iface" != any ]; then
+		for i in $iface; do
+			ip link show "$i" >/dev/null 2>&1 \
+				|| zl_warn "интерфейса '$i' сейчас нет - правила его не найдут"
+		done
+	fi
+	printf '%s\n' "$iface" >"$ZL_ETC/wan-iface"
+	chmod 0644 "$ZL_ETC/wan-iface"
+	zl_info "интерфейс: $iface"
+	# Правила получают привязку oifname, значит перестраиваются.
+	restart_service
+}
+
 # --- диагностика ------------------------------------------------------
 
 DOCTOR_FAIL=0
@@ -292,15 +363,21 @@ cmd_doctor() {
 		d_bad "systemd не обнаружен"
 	fi
 
-	fw=$(zl_detect_fwtype)
-	if [ -n "$fw" ]; then
-		d_ok "firewall: $fw"
+	fw=$(read_state "$ZL_ETC/fwtype" auto)
+	if [ "$fw" != auto ]; then
+		d_ok "firewall: $fw (зафиксирован)"
+	elif fw=$(zl_detect_fwtype); [ -n "$fw" ]; then
+		d_ok "firewall: $fw (автоопределение)"
 	else
 		d_bad "не найдены ни nft, ни iptables"
 	fi
 
 	if [ -r /proc/net/netfilter/nfnetlink_queue ]; then
 		d_ok "модуль nfnetlink_queue загружен"
+	elif [ "$(id -u)" != 0 ]; then
+		# Файл читается только root, поэтому от обычного пользователя
+		# его отсутствие ничего не значит.
+		d_ok "состояние nfnetlink_queue проверяется от root"
 	else
 		d_warn "nfnetlink_queue не виден. Обычно он подгружается при старте службы;
         если служба не стартует, попробуйте: modprobe nfnetlink_queue"
@@ -509,11 +586,15 @@ cmd_check_update() {
 			;;
 	esac
 
-	mkdir -p "$ZL_STATE"
-	printf 'checked=%s\nhave=%s\nlatest=%s\n' \
+	# Результат сохраняем, если можем. Проверка обновлений - операция
+	# чтения, и запрещать её обычному пользователю только потому, что
+	# ему некуда записать отметку, было бы странно.
+	if mkdir -p "$ZL_STATE" 2>/dev/null &&
+	   printf 'checked=%s\nhave=%s\nlatest=%s\n' \
 		"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$have" "$latest" \
-		>"$ZL_STATE/update-check"
-	chmod 0644 "$ZL_STATE/update-check"
+		>"$ZL_STATE/update-check" 2>/dev/null; then
+		chmod 0644 "$ZL_STATE/update-check" 2>/dev/null || true
+	fi
 
 	if [ "$have" = "$latest" ]; then
 		zl_info "установлена актуальная версия flowseal ($have)"
@@ -549,6 +630,8 @@ case "$cmd" in
 	ipset)        cmd_ipset "$@" ;;
 	game-filter)  cmd_game_filter "$@" ;;
 	ipv6)         cmd_ipv6 "$@" ;;
+	fwtype)       cmd_fwtype "$@" ;;
+	wan-iface)    cmd_wan_iface "$@" ;;
 	doctor)       cmd_doctor "$@" ;;
 	check-update) cmd_check_update "$@" ;;
 	restart)      zl_require_root; restart_service ;;

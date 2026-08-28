@@ -86,6 +86,8 @@ zapret-lite rollback            вернуться к предыдущему
 zapret-lite ipset <режим>       loaded | none | any
 zapret-lite game-filter <режим> disabled | all
 zapret-lite ipv6 <режим>        on | off
+zapret-lite fwtype <тип>        auto | iptables | nftables
+zapret-lite wan-iface <имя>     только этот интерфейс, any — все
 zapret-lite check-update        есть ли новые стратегии
 ```
 
@@ -141,6 +143,13 @@ sudo zapret-lite restart
 `FWTYPE` по умолчанию не задан — работает автоопределение апстрима. Если
 у вас уже есть правила iptables (скажем, рядом с WireGuard), навязывать
 nftables мы не будем.
+
+Ограничить обработку одним интерфейсом (полезно там, где много лишних —
+docker, мосты, VPN):
+
+```sh
+sudo zapret-lite wan-iface eth0
+```
 
 **Не редактируйте `/opt/zapret/config`.** Он генерируется, и установщик
 откажется работать, заметив ручные правки. Всё, что вы хотите изменить,
@@ -220,10 +229,10 @@ sudo ./tests/vm-check.sh .
 ## Благодарности
 
 [bol-van](https://github.com/bol-van/zapret) — сам zapret, без которого
-ничего этого нет. [Flowseal](https://github.com/Flowseal/zapret-discord-youtube)
+ничего этого нет. [flowseal](https://github.com/Flowseal/zapret-discord-youtube)
 — стратегии и списки, которые и составляют практическую ценность.
 [kartavkun](https://github.com/kartavkun/zapret-discord-youtube) — идея
-Linux-порта и утилита проверки связности.
+Linux-порта.
 
 ## Лицензия
 
