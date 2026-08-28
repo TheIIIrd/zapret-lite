@@ -1,0 +1,6 @@
+* text=auto eol=lf
+
+# Данные flowseal хранятся побайтово, включая CRLF: их sha256 в
+# MANIFEST.sha256 должен сходиться с исходным релизом, а nfqws '\r'
+# обрезает сам (ipset.c:16).
+vendor/** -text
