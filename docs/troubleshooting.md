@@ -151,9 +151,30 @@ zapret-lite не навязывает тип firewall: работает авто
 WireGuard, — зафиксируйте выбор явно:
 
 ```sh
-echo 'FWTYPE=iptables' | sudo tee -a /etc/zapret-lite/local.conf
-sudo zapret-lite restart
+sudo zapret-lite fwtype iptables
 ```
+
+Или сразу при установке: `sudo ./install.sh --fwtype iptables`.
+Посмотреть текущее состояние — `zapret-lite fwtype` без аргументов.
+
+## Слишком много сетевых интерфейсов
+
+По умолчанию zapret обрабатывает трафик на всех интерфейсах. На машине
+с docker, WireGuard и мостами это лишняя работа, а иногда и вред:
+правила цепляют трафик, которому обход не нужен.
+
+```sh
+sudo zapret-lite wan-iface eth0
+```
+
+Несколько интерфейсов — через пробел в кавычках: `"eth0 wlan0"`.
+Вернуть обработку всех — `any`. При установке: `--wan-iface eth0`.
+
+Посмотреть список интерфейсов и текущий выбор: `zapret-lite wan-iface`
+без аргументов.
+
+Под капотом это `IFACE_WAN` апстрима: правила nfqws получают привязку
+`oifname @wanif` (`common/nft.sh`, `_nft_fw_nfqws_post4`).
 
 Перед первой установкой стоит снять снимок и сверить его после удаления:
 

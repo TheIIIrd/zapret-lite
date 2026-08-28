@@ -653,3 +653,92 @@ PY
 	run find "$ZL_PREFIX" -type f
 	[ -z "$output" ]
 }
+
+# --- тип firewall и ограничение по интерфейсу -------------------------
+
+@test "fwtype фиксирует тип firewall в конфиге" {
+	run load_config 'echo "F=${FWTYPE-авто}"'
+	[[ "$output" == *"F=авто"* ]]
+
+	zl fwtype iptables
+	run load_config 'echo "F=$FWTYPE"'
+	[[ "$output" == *"F=iptables"* ]]
+
+	zl fwtype nftables
+	run load_config 'echo "F=$FWTYPE"'
+	[[ "$output" == *"F=nftables"* ]]
+
+	zl fwtype auto
+	run load_config 'echo "F=${FWTYPE-авто}"'
+	[[ "$output" == *"F=авто"* ]]
+}
+
+@test "fwtype отвергает неизвестный тип" {
+	run zl fwtype ebtables
+	[ "$status" -ne 0 ]
+	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/fwtype")" = "auto" ]
+}
+
+@test "мусор в файле fwtype откатывает на автоопределение" {
+	printf 'мусор\n' >"$ZL_PREFIX/etc/zapret-lite/fwtype"
+	run load_config 'echo "F=${FWTYPE-авто}"'
+	[[ "$output" == *"F=авто"* ]]
+	[[ "$output" == *"неизвестный тип firewall"* ]]
+}
+
+@test "wan-iface ограничивает обработку одним интерфейсом" {
+	run load_config 'echo "W=${IFACE_WAN-все}"'
+	[[ "$output" == *"W=все"* ]]
+
+	zl wan-iface eth0
+	run load_config 'echo "W=$IFACE_WAN"'
+	[[ "$output" == *"W=eth0"* ]]
+
+	zl wan-iface any
+	run load_config 'echo "W=${IFACE_WAN-все}"'
+	[[ "$output" == *"W=все"* ]]
+}
+
+@test "wan-iface принимает несколько интерфейсов" {
+	zl wan-iface "eth0 wlan0"
+	run load_config 'echo "W=$IFACE_WAN"'
+	[[ "$output" == *"W=eth0 wlan0"* ]]
+}
+
+@test "wan-iface отвергает опасное имя" {
+	# Значение попадает в правила firewall, поэтому набор символов узкий.
+	for bad in 'eth0;id' 'eth0$(id)' 'eth0|x' '../eth0'; do
+		run zl wan-iface "$bad"
+		[ "$status" -ne 0 ] || { echo "принято: $bad"; return 1; }
+	done
+}
+
+@test "оба режима переживают переустановку и видны в status" {
+	zl fwtype iptables
+	zl wan-iface eth0
+	install_pkg "$PKG" >/dev/null
+	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/fwtype")" = "iptables" ]
+	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/wan-iface")" = "eth0" ]
+	run zl status
+	[[ "$output" == *"Интерфейс     : eth0"* ]]
+	run zl doctor
+	[[ "$output" == *"firewall: iptables (зафиксирован)"* ]]
+}
+
+@test "флаги установщика задают оба режима" {
+	( cd "$PKG" && sh uninstall.sh --purge >/dev/null )
+	install_pkg "$PKG" --strategy general --fwtype iptables --wan-iface eth0 >/dev/null
+	run load_config 'echo "F=$FWTYPE W=$IFACE_WAN"'
+	[[ "$output" == *"F=iptables"* ]]
+	[[ "$output" == *"W=eth0"* ]]
+}
+
+@test "check-update не падает, когда некуда записать отметку" {
+	# От обычного пользователя /var/lib недоступен, но сама проверка -
+	# это чтение, и запрещать её из-за отметки было бы странно.
+	printf '{"tag_name":"1.10.2"}' >"$BATS_TEST_TMPDIR/r.json"
+	ZL_STATE=/proc/недоступно ZL_UPDATE_URL="file://$BATS_TEST_TMPDIR/r.json" \
+		run zl check-update
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"актуальная версия"* ]]
+}
