@@ -1,0 +1,56 @@
+# Этот файл создан zapret-lite и заменяет /opt/zapret/config.
+#
+# Не редактируйте его: при следующей операции zapret-lite он будет
+# перезаписан. Установщик запоминает sha256 этого файла и откажется
+# его трогать, если он изменён вручную.
+#
+# Свои настройки пишите в @ZL_ETC@/local.conf. Он подключается
+# последним и перекрывает и умолчания, и выбранную стратегию.
+#
+# Порядок слоёв:
+#   1. base.conf   - константы zapret-lite и умолчания zapret
+#   2. стратегия   - NFQWS_OPT и NFQWS_PORTS_*, сгенерировано из flowseal
+#   3. local.conf  - ваши правки, последнее слово
+#
+# Слои 1 и 2 читаются из текущего поколения (@ZL_BASE@/current).
+# Откат на предыдущее поколение меняет их обоих разом, без правки
+# этого файла.
+#
+# ZAPRET_LITE_SHIM_VERSION=2
+
+if [ -r @ZL_BASE@/current/config/base.conf ]; then
+	. @ZL_BASE@/current/config/base.conf
+else
+	echo "zapret-lite: нет текущего поколения," \
+	     "переустановите или откатитесь: zapret-lite rollback" >&2
+	NFQWS_ENABLE=0
+	return 0 2>/dev/null || exit 0
+fi
+
+# Выбранная стратегия - это состояние пользователя, а не содержимое
+# поколения, поэтому имя хранится отдельно и переживает обновление.
+ZAPRET_LITE_STRATEGY=
+if [ -r @ZL_ETC@/strategy ]; then
+	read -r ZAPRET_LITE_STRATEGY <@ZL_ETC@/strategy
+fi
+
+# Имя подставляется в путь, поэтому проверяется.
+case "$ZAPRET_LITE_STRATEGY" in
+	""|.*|*[!A-Za-z0-9._-]*)
+		echo "zapret-lite: недопустимое имя стратегии в @ZL_ETC@/strategy" >&2
+		ZAPRET_LITE_STRATEGY=
+		;;
+esac
+
+if [ -n "$ZAPRET_LITE_STRATEGY" ] &&
+   [ -r "@ZL_BASE@/current/strategies/$ZAPRET_LITE_STRATEGY.conf" ]; then
+	. "@ZL_BASE@/current/strategies/$ZAPRET_LITE_STRATEGY.conf"
+else
+	echo "zapret-lite: стратегия '$ZAPRET_LITE_STRATEGY' недоступна" \
+	     "в текущем поколении. Выберите: zapret-lite use <имя>" >&2
+	NFQWS_ENABLE=0
+fi
+
+if [ -r @ZL_ETC@/local.conf ]; then
+	. @ZL_ETC@/local.conf
+fi

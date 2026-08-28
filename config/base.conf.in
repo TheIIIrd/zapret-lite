@@ -1,0 +1,153 @@
+# @ZL_BASE@/config/base.conf
+#
+# Плейсхолдеры @ZL_BASE@ / @ZL_ETC@ подставляются установщиком.
+# В боевой установке это /opt/zapret-lite и /etc/zapret-lite.
+#
+# Константы и умолчания zapret-lite. Подключается первым слоем из
+# /opt/zapret/config.
+#
+# ВНИМАНИЕ: файл читается через '.' из /opt/zapret/init.d/sysv/functions,
+# у которого шебанг /bin/sh. Только POSIX sh: без массивов, без [[ ]],
+# без bash-подстановок. Пробелов в путях быть не должно - init-скрипт
+# раскрывает опции без кавычек (init.d/sysv/functions:175).
+#
+# Этот файл ставится установщиком и перезаписывается при обновлении.
+# Свои правки держите в /etc/zapret-lite/local.conf - он подключается
+# последним и перекрывает всё, что здесь.
+
+ZAPRET_LITE_BASE=@ZL_BASE@
+ZAPRET_LITE_ETC=@ZL_ETC@
+
+# Фейковые пейлоады и вендорные списки текущего поколения. Каталог
+# неизменяемый: обновление создаёт новое поколение рядом и переключает
+# симлинк current, а не правит содержимое на месте.
+ZAPRET_FAKE_DIR="$ZAPRET_LITE_BASE/current/fake"
+ZAPRET_LISTS_DIR="$ZAPRET_LITE_BASE/current/lists"
+
+# Пользовательские списки и переключаемое состояние. Обновление сюда
+# не лезет.
+ZAPRET_LOCAL_LISTS_DIR="$ZAPRET_LITE_ETC/lists"
+
+
+# --- игровой фильтр ---------------------------------------------------
+#
+# Порт 12 - заглушка flowseal для выключенного фильтра: реального трафика
+# на нём нет, поэтому профиль просто никогда не срабатывает. Держим ту же
+# семантику, чтобы стратегии переносились без правок.
+#
+# Режим хранится файлом, а не переменной: менеджер меняет его без
+# редактирования конфигов.
+GAME_FILTER_TCP=12
+GAME_FILTER_UDP=12
+
+if [ -r "$ZAPRET_LITE_ETC/game-filter.mode" ]; then
+	read ZAPRET_GAME_FILTER_MODE <"$ZAPRET_LITE_ETC/game-filter.mode"
+else
+	ZAPRET_GAME_FILTER_MODE=disabled
+fi
+
+# Режима два, как и у flowseal: фильтр либо включён, либо нет.
+# Раздельные tcp/udp были нашей выдумкой - в исходных стратегиях такого
+# деления нет, а поддерживать его пришлось бы вечно.
+case "$ZAPRET_GAME_FILTER_MODE" in
+	all)
+		GAME_FILTER_TCP=1024-65535
+		GAME_FILTER_UDP=1024-65535
+		;;
+	disabled)
+		;;
+	*)
+		echo "zapret-lite: неизвестный режим игрового фильтра" \
+		     "'$ZAPRET_GAME_FILTER_MODE', фильтр выключен" >&2
+		ZAPRET_GAME_FILTER_MODE=disabled
+		;;
+esac
+
+
+# --- умолчания zapret -------------------------------------------------
+#
+# Значения ниже совпадают с config.default апстрима и приведены явно,
+# чтобы поведение не зависело от версии шаблона.
+
+SET_MAXELEM=522288
+IPSET_OPT="hashsize 262144 maxelem $SET_MAXELEM"
+
+IP2NET_OPT4="--prefix-length=22-30 --v4-threshold=3/4"
+IP2NET_OPT6="--prefix-length=56-64 --v6-threshold=5"
+
+AUTOHOSTLIST_RETRANS_THRESHOLD=3
+AUTOHOSTLIST_FAIL_THRESHOLD=3
+AUTOHOSTLIST_FAIL_TIME=60
+AUTOHOSTLIST_DEBUGLOG=0
+
+MDIG_THREADS=30
+GZIP_LISTS=1
+
+DESYNC_MARK=0x40000000
+DESYNC_MARK_POSTNAT=0x20000000
+
+# tpws не используется: все стратегии flowseal построены на nfqws.
+# Порты всё равно задаём: common/base.sh:423 читает TPWS_PORTS
+# безусловно, ещё до проверки TPWS_ENABLE.
+TPWS_ENABLE=0
+TPWS_SOCKS_ENABLE=0
+TPWS_PORTS=80,443
+TPPORT_SOCKS=987
+
+# Ограничители connbytes. Стратегии полагаются на --dpi-desync-cutoff=nN,
+# и эти значения задают верхнюю границу в ядре.
+NFQWS_TCP_PKT_OUT=$((6 + AUTOHOSTLIST_RETRANS_THRESHOLD))
+NFQWS_TCP_PKT_IN=3
+NFQWS_UDP_PKT_OUT=$((6 + AUTOHOSTLIST_RETRANS_THRESHOLD))
+NFQWS_UDP_PKT_IN=0
+
+# Фильтрация задаётся самими стратегиями через --hostlist/--ipset,
+# режим MODE_FILTER апстрима не используется.
+MODE_FILTER=none
+
+FLOWOFFLOAD=donttouch
+INIT_APPLY_FW=1
+
+
+# --- IPv6 -------------------------------------------------------------
+#
+# Апстримный install_easy.sh спрашивает про IPv6 при установке
+# (common/installer.sh:807). Мы неинтерактивны, поэтому выбор хранится
+# файлом и меняется командой: zapret-lite ipv6 on|off
+#
+# Почему это важно. При выключенном IPv6 правила для него не создаются
+# совсем. У flowseal в .bat нет --wf-l3, то есть winws на Windows
+# обрабатывает обе версии протокола. На двустековом подключении YouTube
+# и Discord часто ходят по IPv6, и обход к ним тогда не применяется -
+# со стороны это неотличимо от неподходящей стратегии.
+#
+# По умолчанию выключено, как у апстрима: включение затрагивает правила
+# firewall, и решать это должен человек, а не наше предположение.
+if [ -r "$ZAPRET_LITE_ETC/ipv6.mode" ]; then
+	read ZAPRET_LITE_IPV6 <"$ZAPRET_LITE_ETC/ipv6.mode"
+else
+	ZAPRET_LITE_IPV6=off
+fi
+
+case "$ZAPRET_LITE_IPV6" in
+	on)  DISABLE_IPV6=0 ;;
+	off) DISABLE_IPV6=1 ;;
+	*)
+		echo "zapret-lite: неизвестный режим ipv6" \
+		     "'$ZAPRET_LITE_IPV6', IPv6 выключен" >&2
+		ZAPRET_LITE_IPV6=off
+		DISABLE_IPV6=1
+		;;
+esac
+
+# Дропать ICMP time-exceeded для подделанных соединений. Без этого
+# рвутся соединения в ответ на TCP SYN и UDP.
+FILTER_TTL_EXPIRED_ICMP=1
+
+# Списки статические и приезжают из flowseal. Скачивание реестра
+# не используется, таймер zapret-list-update не ставится.
+GETLIST=
+
+# FWTYPE намеренно не задан: автоопределение апстрима, а явный выбор
+# пользователя живёт в local.conf. На системах, где уже есть свои правила
+# iptables (например, рядом с WireGuard), это позволяет остаться на iptables.
