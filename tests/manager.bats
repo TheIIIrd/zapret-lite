@@ -1002,3 +1002,20 @@ PY
 	done
 }
 
+
+@test "doctor проверяет, подключён ли nfqws к очереди" {
+	# Сама проверка недостижима из префикса: она требует настоящей
+	# службы и файла /proc, читаемого только root. Логика покрыта
+	# модульными тестами (zl_queue_attached), здесь - что doctor её
+	# действительно вызывает и различает все три исхода.
+	local d
+	d=$(sed -n '/^cmd_doctor()/,/^}/p' "$REPO/bin/zapret-lite")
+	printf '%s' "$d" | grep -q 'zl_queue_attached' \
+		|| { echo "doctor не вызывает zl_queue_attached"; return 1; }
+	printf '%s' "$d" | grep -q 'подключён к очереди' \
+		|| { echo "нет сообщения об успехе"; return 1; }
+	printf '%s' "$d" | grep -q 'никто не подключён' \
+		|| { echo "нет сообщения об отказе"; return 1; }
+	printf '%s' "$d" | grep -q 'проверяется от root' \
+		|| { echo "не различает случай, когда узнать нельзя"; return 1; }
+}

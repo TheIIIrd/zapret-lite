@@ -371,7 +371,7 @@ d_warn() { printf '  [ ! ] %s\n' "$*"; DOCTOR_WARN=$((DOCTOR_WARN + 1)); }
 d_bad()  { printf '  [ - ] %s\n' "$*"; DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); }
 
 cmd_doctor() {
-	local gen strat fw n missing bin out mode p dis6 want virt iface i
+	local gen strat fw n missing bin out mode p dis6 want virt iface i qnum
 
 	printf '\n--- Окружение\n'
 	if [ -n "$ZL_PREFIX" ]; then
@@ -591,6 +591,30 @@ cmd_doctor() {
         подробности: journalctl -u zapret -n 50"
 				fi
 				;;
+		esac
+	fi
+
+	# "Служба активна" и "nfqws подключён к очереди" - разные вещи.
+	# Между ними помещается тихий отказ: правила стоят, трафик в очередь
+	# заворачивается, а забирать его некому.
+	#
+	# Номер очереди задаёт QNUM; апстрим по умолчанию берёт 200
+	# (init.d/sysv/functions:76).
+	if [ -z "$ZL_PREFIX" ] && zl_manage_systemd &&
+	   systemctl is-active --quiet zapret 2>/dev/null; then
+		qnum=$(
+			set +eu
+			# shellcheck disable=SC1090,SC1091
+			. "$ZL_ZAPRET_DIR/config" 2>/dev/null
+			printf '%s' "${QNUM:-200}"
+		)
+		zl_queue_attached "$qnum"
+		case $? in
+			0) d_ok "nfqws подключён к очереди $qnum" ;;
+			1) d_bad "к очереди $qnum никто не подключён:
+        правила заворачивают трафик, а забирать его некому.
+        Смотрите: journalctl -u zapret -n 50" ;;
+			*) d_ok "состояние очереди проверяется от root" ;;
 		esac
 	fi
 

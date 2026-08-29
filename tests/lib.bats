@@ -228,3 +228,52 @@ SYS
 	[ "$(cat "$f")" = "старое" ]
 	[[ "$output" == *"не запустилась"* ]]
 }
+
+# --- очередь nfqueue --------------------------------------------------
+#
+# Эти тесты написаны ДО реализации. Задача: отличить "служба активна" от
+# "nfqws действительно подключён к очереди". Между ними помещается целый
+# класс тихих отказов, которых doctor пока не видит.
+
+@test "zl_queue_attached видит подключённую очередь" {
+	local f="$BATS_TEST_TMPDIR/nfq"
+	# Формат ядра: queue_number portid queue_total copy_mode copy_range
+	#              queue_dropped user_dropped id_sequence
+	printf '  200  1297     0 2 65531     0     0        1  1\n' >"$f"
+	run zl_queue_attached 200 "$f"
+	[ "$status" -eq 0 ]
+}
+
+@test "zl_queue_attached не путает похожие номера очередей" {
+	local f="$BATS_TEST_TMPDIR/nfq2"
+	printf ' 2001  1297     0 2 65531     0     0        1  1\n' >"$f"
+	run zl_queue_attached 200 "$f"
+	[ "$status" -ne 0 ]
+	run zl_queue_attached 2001 "$f"
+	[ "$status" -eq 0 ]
+}
+
+@test "zl_queue_attached отвергает пустой файл" {
+	local f="$BATS_TEST_TMPDIR/nfq3"
+	: >"$f"
+	run zl_queue_attached 200 "$f"
+	[ "$status" -ne 0 ]
+}
+
+@test "zl_queue_attached различает отсутствие файла и отсутствие очереди" {
+	# Файл читается только root; от обычного пользователя его нет, и это
+	# не то же самое, что "очередь не подключена". Код 2 - неизвестно.
+	run zl_queue_attached 200 "$BATS_TEST_TMPDIR/нет-файла"
+	[ "$status" -eq 2 ]
+}
+
+@test "zl_queue_attached находит очередь среди нескольких" {
+	local f="$BATS_TEST_TMPDIR/nfq4"
+	printf '  100  1111     0 2 65531     0     0        1  1\n' >"$f"
+	printf '  200  1297     3 2 65531     0     0        7  1\n' >>"$f"
+	printf '  300  1555     0 2 65531     0     0        1  1\n' >>"$f"
+	run zl_queue_attached 200 "$f"
+	[ "$status" -eq 0 ]
+	run zl_queue_attached 400 "$f"
+	[ "$status" -ne 0 ]
+}

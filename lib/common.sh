@@ -299,6 +299,25 @@ zl_virt_breaks_bypass() {
 	esac
 }
 
+# Подключён ли кто-нибудь к очереди NFQUEUE с указанным номером.
+#
+# Различает три исхода, и это важно: 0 - подключён, 1 - нет, 2 - узнать
+# не удалось. Файл /proc/net/netfilter/nfnetlink_queue читается только
+# root, и от обычного пользователя его недоступность не значит, что
+# очередь пуста.
+#
+# Второй аргумент нужен тестам: без него функцию можно было бы проверить
+# только на живой системе с работающим nfqws.
+zl_queue_attached() {
+	# $1 - номер очереди, $2 - файл (по умолчанию системный)
+	local num="$1" file="${2:-/proc/net/netfilter/nfnetlink_queue}" q
+	[ -r "$file" ] || return 2
+	while read -r q _; do
+		[ "$q" = "$num" ] && return 0
+	done <"$file"
+	return 1
+}
+
 zl_systemd_ok() {
 	[ -d /run/systemd/system ] && zl_have systemctl
 }
