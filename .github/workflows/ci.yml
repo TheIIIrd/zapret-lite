@@ -76,7 +76,10 @@ jobs:
           systemd-analyze verify systemd/zapret-lite-check-update.timer
           mkdir -p /tmp/u/zapret.service.d
           cp systemd/10-zapret-lite.conf /tmp/u/zapret.service.d/
-          printf '[Unit]\nDescription=t\n[Service]\nType=oneshot\nExecStart=/bin/true\n' \
+          # Заглушка обязана повторять тип настоящего юнита апстрима:
+          # Restart=always запрещён для Type=oneshot, и на заглушке с
+          # неверным типом проверка упала бы на ровном месте.
+          printf '[Unit]\nDescription=t\n[Service]\nType=forking\nExecStart=/bin/true\n' \
             > /tmp/u/zapret.service
           systemd-analyze verify /tmp/u/zapret.service
 

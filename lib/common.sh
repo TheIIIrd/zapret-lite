@@ -199,15 +199,31 @@ zl_fwtype_available() {
 	[ -z "$missing" ] && return 0
 	zl_error "для режима $1 не хватает команд: $missing"
 	case "$1" in
-		iptables)
-			zl_error "Установите пакеты и повторите, например:"
-			zl_error "  sudo apt install iptables ipset"
-			;;
-		nftables)
-			zl_error "Установите пакет nftables и повторите."
-			;;
+		iptables) zl_error "$(zl_install_hint 'iptables ipset')" ;;
+		nftables) zl_error "$(zl_install_hint nftables)" ;;
 	esac
 	return 1
+}
+
+# Подсказка по установке пакетов для текущего дистрибутива.
+#
+# Совет "sudo apt install" на Arch или Fedora бесполезен, а проект
+# заявлен для Debian, Ubuntu, Mint, RHEL, Fedora, openSUSE и Arch.
+# Определяем по наличию менеджера пакетов, а не по /etc/os-release:
+# производных дистрибутивов слишком много, чтобы перечислять их имена.
+zl_install_hint() {
+	# $1 - имена пакетов через пробел
+	if zl_have apt-get; then
+		printf 'Установите и повторите: sudo apt install %s' "$1"
+	elif zl_have dnf; then
+		printf 'Установите и повторите: sudo dnf install %s' "$1"
+	elif zl_have pacman; then
+		printf 'Установите и повторите: sudo pacman -S %s' "$1"
+	elif zl_have zypper; then
+		printf 'Установите и повторите: sudo zypper install %s' "$1"
+	else
+		printf 'Установите пакеты (%s) средствами вашего дистрибутива' "$1"
+	fi
 }
 
 # Меняет переключатель, влияющий на СОСТАВ правил firewall.
@@ -225,7 +241,9 @@ zl_fwtype_available() {
 # Поэтому: остановить старым конфигом, записать, запустить новым.
 zl_switch_state() {
 	# $1 - файл состояния, $2 - новое значение
-	local file="$1" value="$2" was_active=0
+	local file="$1" value="$2" was_active=0 old=''
+
+	[ -r "$file" ] && read -r old <"$file"
 
 	if zl_manage_systemd && systemctl is-active --quiet zapret 2>/dev/null; then
 		was_active=1
@@ -237,10 +255,33 @@ zl_switch_state() {
 	chmod 0644 "$file"
 
 	[ "$was_active" = 1 ] || return 0
+
+	# Намеренная остановка и запуск не должны копиться в счётчике
+	# аварийных перезапусков: иначе несколько переключений подряд
+	# упираются в start-limit-hit, хотя ничего не ломалось.
+	systemctl reset-failed zapret >/dev/null 2>&1 || true
 	if systemctl start zapret; then
 		return 0
 	fi
-	zl_error "служба не запустилась. Смотрите: journalctl -u zapret -n 50"
+
+	# Служба не поднялась с новым значением. Оставлять человека без
+	# работающего обхода из-за опечатки нельзя: возвращаем прежнее.
+	# Так, например, "wan-iface ens32" вместо "ens33" перестаёт быть
+	# необратимой ошибкой.
+	zl_error "служба не запустилась с новым значением '$value'."
+	if [ -n "$old" ]; then
+		printf '%s\n' "$old" >"$file"
+		chmod 0644 "$file"
+		systemctl reset-failed zapret >/dev/null 2>&1 || true
+		if systemctl start zapret; then
+			zl_error "значение возвращено к '$old', служба работает."
+		else
+			zl_error "возврат к '$old' тоже не помог."
+			zl_error "Смотрите: journalctl -u zapret -n 50"
+		fi
+	else
+		zl_error "Смотрите: journalctl -u zapret -n 50"
+	fi
 	return 1
 }
 
@@ -272,6 +313,25 @@ zl_virt_breaks_bypass() {
 		vmware|oracle|virtualbox|vmw*) return 0 ;;
 		*) return 1 ;;
 	esac
+}
+
+# Подключён ли кто-нибудь к очереди NFQUEUE с указанным номером.
+#
+# Различает три исхода, и это важно: 0 - подключён, 1 - нет, 2 - узнать
+# не удалось. Файл /proc/net/netfilter/nfnetlink_queue читается только
+# root, и от обычного пользователя его недоступность не значит, что
+# очередь пуста.
+#
+# Второй аргумент нужен тестам: без него функцию можно было бы проверить
+# только на живой системе с работающим nfqws.
+zl_queue_attached() {
+	# $1 - номер очереди, $2 - файл (по умолчанию системный)
+	local num="$1" file="${2:-/proc/net/netfilter/nfnetlink_queue}" q
+	[ -r "$file" ] || return 2
+	while read -r q _; do
+		[ "$q" = "$num" ] && return 0
+	done <"$file"
+	return 1
 }
 
 zl_systemd_ok() {
@@ -408,8 +468,8 @@ zl_apply_ipset_mode() {
 	dst="$ZL_ETC/lists/ipset-all.txt"
 	src="$ZL_CURRENT/lists/ipset-all.full.txt"
 
-	if [ -r "$ZL_ETC/ipset.mode" ]; then
-		read -r mode <"$ZL_ETC/ipset.mode"
+	if [ -r "$ZL_ETC/ipset" ]; then
+		read -r mode <"$ZL_ETC/ipset"
 	else
 		mode=loaded
 	fi

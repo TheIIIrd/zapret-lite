@@ -88,13 +88,13 @@ setup() {
 		run zl game-filter "$m"
 		[ "$status" -ne 0 ]
 	done
-	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/game-filter.mode")" = "disabled" ]
+	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/game-filter")" = "disabled" ]
 }
 
 @test "game-filter отвергает неизвестный режим" {
 	run zl game-filter неведомое
 	[ "$status" -ne 0 ]
-	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/game-filter.mode")" = "disabled" ]
+	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/game-filter")" = "disabled" ]
 }
 
 @test "ipset переключается между тремя режимами" {
@@ -118,7 +118,7 @@ setup() {
 }
 
 @test "битый файл режима не роняет загрузку конфига" {
-	printf 'мусор\n' >"$ZL_PREFIX/etc/zapret-lite/game-filter.mode"
+	printf 'мусор\n' >"$ZL_PREFIX/etc/zapret-lite/game-filter"
 	run load_config 'echo "T=$NFQWS_PORTS_TCP"'
 	# Откат на выключенный фильтр, а не падение.
 	[[ "$output" == *",12"* ]]
@@ -399,7 +399,7 @@ setup() {
 	# несуществующая команда update. Пусть расхождение ловится тестом.
 	local mgr="$REPO/bin/zapret-lite"
 	ZL_LIB="$REPO/lib" sh "$mgr" --help \
-		| grep -oE 'zapret-lite [a-z0-9-]+' | awk '{print $2}' | sort -u >"$BATS_TEST_TMPDIR/help"
+		| grep -oE '^  zapret-lite [a-z0-9-]+' | awk '{print $2}' | sort -u >"$BATS_TEST_TMPDIR/help"
 	# tr -d '[:space:]' склеил бы все имена в одну строку: перевод строки
 	# он тоже удаляет. Убираем только скобку и ведущие пробелы.
 	sed -n '/^case "\$cmd" in/,/^esac/p' "$mgr" \
@@ -485,13 +485,13 @@ setup() {
 @test "ipv6 отвергает неизвестный режим" {
 	run zl ipv6 неведомое
 	[ "$status" -ne 0 ]
-	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/ipv6.mode")" = "off" ]
+	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/ipv6")" = "off" ]
 }
 
 @test "режим ipv6 переживает переустановку" {
 	zl ipv6 on
 	install_pkg "$PKG" >/dev/null
-	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/ipv6.mode")" = "on" ]
+	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/ipv6")" = "on" ]
 	run zl status
 	[[ "$output" == *"IPv6          : on"* ]]
 }
@@ -499,13 +499,13 @@ setup() {
 @test "--ipv6 при установке задаёт режим" {
 	( cd "$PKG" && sh uninstall.sh --purge >/dev/null )
 	install_pkg "$PKG" --strategy general --ipv6 >/dev/null
-	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/ipv6.mode")" = "on" ]
+	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/ipv6")" = "on" ]
 	run load_config 'echo "D=$DISABLE_IPV6"'
 	[[ "$output" == *"D=0"* ]]
 }
 
 @test "битый файл режима ipv6 не роняет конфиг" {
-	printf 'мусор\n' >"$ZL_PREFIX/etc/zapret-lite/ipv6.mode"
+	printf 'мусор\n' >"$ZL_PREFIX/etc/zapret-lite/ipv6"
 	run load_config 'echo "D=$DISABLE_IPV6"'
 	[[ "$output" == *"D=1"* ]]
 	[[ "$output" == *"неизвестный режим ipv6"* ]]
@@ -858,4 +858,164 @@ PY
 	done
 	run dash -c "set -eu; . '$REPO/lib/common.sh'; PATH='$nosys'; zl_detect_virt"
 	[ "$status" -eq 0 ]
+}
+
+@test "установщик сообщает тот тип firewall, который будет использован" {
+	# При явном --fwtype iptables печаталась ещё и строка автоопределения
+	# "firewall: nftables", и казалось, что флаг проигнорирован.
+	( cd "$PKG" && sh uninstall.sh --purge >/dev/null )
+	run install_pkg "$PKG" --strategy general --fwtype iptables
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"firewall: iptables (задан явно)"* ]]
+	[[ "$output" != *"firewall: nftables"* ]]
+}
+
+@test "переключения подряд не упираются в ограничитель systemd" {
+	# StartLimitIntervalSec=300 при StartLimitBurst=5 давал 5 запусков за
+	# пять минут - в тридцать раз строже штатного systemd. Пятое подряд
+	# переключение падало со start-limit-hit, хотя ничего не ломалось.
+	local n
+	n=$(grep -c 'StartLimitIntervalSec=30$' "$REPO/systemd/10-zapret-lite.conf")
+	[ "$n" = 1 ] || { echo "интервал ограничителя вернулся к прежнему"; return 1; }
+
+	# И намеренные операции сбрасывают счётчик аварийных перезапусков.
+	grep -q 'reset-failed' "$REPO/lib/common.sh" \
+		|| { echo "zl_switch_state не сбрасывает счётчик"; return 1; }
+	grep -q 'reset-failed' "$REPO/bin/zapret-lite" \
+		|| { echo "restart_service не сбрасывает счётчик"; return 1; }
+
+	# Практическая проверка: восемь переключений подряд должны пройти.
+	for _ in 1 2 3 4 5 6 7 8; do
+		zl game-filter all >/dev/null
+		zl game-filter disabled >/dev/null
+	done
+	run zl status
+	[[ "$output" == *"Игровой фильтр: disabled"* ]]
+}
+
+@test "drop-in перезапускает службу при падении nfqws" {
+	# Проверено вживую: pkill -x nfqws опустошает cgroup, и юнит
+	# Type=forking без главного PID завершается как "Deactivated
+	# successfully". Restart=on-failure на успешное завершение не
+	# реагирует, и обход тихо переставал работать.
+	local f="$REPO/systemd/10-zapret-lite.conf"
+	grep -q '^Restart=always$' "$f" \
+		|| { echo "Restart вернулся к значению, не реагирующему на падение"; return 1; }
+	grep -q '^Restart=on-failure$' "$f" && { echo "on-failure здесь бесполезен"; return 1; }
+
+	# Ограничитель обязан остаться: с always без него аварийный цикл
+	# крутился бы вечно.
+	grep -q '^StartLimitBurst=' "$f"
+	grep -q '^StartLimitIntervalSec=' "$f"
+}
+
+@test "заглушка юнита в CI повторяет тип настоящего" {
+	# Restart=always запрещён для Type=oneshot: заглушка с неверным типом
+	# роняет systemd-analyze verify на ровном месте. Проверяем именно
+	# строку заглушки, а не любое упоминание - Type=oneshot законно стоит
+	# в юните проверки обновлений и встречается в комментариях.
+	run grep -c 'Type=forking.*ExecStart=/bin/true' "$REPO/.github/workflows/ci.yml"
+	[ "$output" = "1" ]
+}
+
+@test "doctor замечает несуществующий интерфейс" {
+	# Тихий отказ: на nftables служба стартует нормально, имя просто
+	# кладётся в набор, и правила не совпадают ни с чем. Опечатка
+	# выглядит как неработающая стратегия.
+	printf 'нет-такого-интерфейса\n' >"$ZL_PREFIX/etc/zapret-lite/wan-iface"
+	run zl doctor
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"интерфейса нет в системе"* ]]
+
+	printf 'any\n' >"$ZL_PREFIX/etc/zapret-lite/wan-iface"
+	run zl doctor
+	[[ "$output" == *"обрабатываются все"* ]]
+}
+
+@test "status не называет службу остановленной в префиксе" {
+	# Останавливать было нечего: юнит лежит под префиксом, и настоящий
+	# systemd его не видит.
+	run zl status
+	[[ "$output" == *"не управляется (префикс)"* ]]
+	[[ "$output" != *"Служба        : остановлена"* ]]
+}
+
+@test "установщик сбрасывает счётчик аварий перед запуском" {
+	# Служба могла остаться в failed от прежних попыток, и установка
+	# споткнулась бы на ровном месте.
+	grep -q 'reset-failed zapret' "$REPO/install.sh"
+}
+
+# --- короткие формы команд --------------------------------------------
+
+@test "каждая команда имеет короткую форму, и она уникальна" {
+	local mgr="$REPO/bin/zapret-lite"
+	# Длинные имена из справки.
+	ZL_LIB="$REPO/lib" sh "$mgr" --help \
+		| grep -oE '^  zapret-lite [a-z0-9-]+' | awk '{print $2}' | sort >"$BATS_TEST_TMPDIR/long"
+	# Короткие формы из таблицы раскрытия.
+	sed -n '/^zl_expand_alias()/,/^}/p' "$mgr" \
+		| grep -oE "^[[:space:]]+[a-z0-9]{2}\) echo [a-z0-9-]+" \
+		| awk '{print $3}' | sort >"$BATS_TEST_TMPDIR/short"
+
+	run diff "$BATS_TEST_TMPDIR/long" "$BATS_TEST_TMPDIR/short"
+	[ "$status" -eq 0 ]
+
+	# Сокращения не должны повторяться.
+	local n u
+	n=$(sed -n '/^zl_expand_alias()/,/^}/p' "$mgr" | grep -cE "^[[:space:]]+[a-z0-9]{2}\)")
+	u=$(sed -n '/^zl_expand_alias()/,/^}/p' "$mgr" | grep -oE "^[[:space:]]+[a-z0-9]{2}\)" | sort -u | wc -l)
+	[ "$n" = "$u" ]
+}
+
+@test "короткие формы делают то же, что длинные" {
+	run zl st
+	local long="$output"
+	run zl status
+	[ "$output" = "$long" ]
+
+	run zl li
+	long="$output"
+	run zl list
+	[ "$output" = "$long" ]
+}
+
+@test "короткая форма с аргументом работает" {
+	zl gf all
+	run zl status
+	[[ "$output" == *"Игровой фильтр: all"* ]]
+	zl gf disabled
+}
+
+# --- согласованные имена файлов состояния -----------------------------
+
+@test "файлы состояния переключателей без суффикса" {
+	local f
+	for f in ipset game-filter ipv6 fwtype wan-iface strategy; do
+		[ -f "$ZL_PREFIX/etc/zapret-lite/$f" ] \
+			|| { echo "нет $f"; return 1; }
+	done
+	# Старых имён остаться не должно.
+	for f in ipset.mode game-filter.mode ipv6.mode; do
+		[ ! -e "$ZL_PREFIX/etc/zapret-lite/$f" ] \
+			|| { echo "осталось старое имя: $f"; return 1; }
+	done
+}
+
+
+@test "doctor проверяет, подключён ли nfqws к очереди" {
+	# Сама проверка недостижима из префикса: она требует настоящей
+	# службы и файла /proc, читаемого только root. Логика покрыта
+	# модульными тестами (zl_queue_attached), здесь - что doctor её
+	# действительно вызывает и различает все три исхода.
+	local d
+	d=$(sed -n '/^cmd_doctor()/,/^}/p' "$REPO/bin/zapret-lite")
+	printf '%s' "$d" | grep -q 'zl_queue_attached' \
+		|| { echo "doctor не вызывает zl_queue_attached"; return 1; }
+	printf '%s' "$d" | grep -q 'подключён к очереди' \
+		|| { echo "нет сообщения об успехе"; return 1; }
+	printf '%s' "$d" | grep -q 'никто не подключён' \
+		|| { echo "нет сообщения об отказе"; return 1; }
+	printf '%s' "$d" | grep -q 'проверяется от root' \
+		|| { echo "не различает случай, когда узнать нельзя"; return 1; }
 }

@@ -198,3 +198,102 @@ setup() {
 	run zl_verify_manifest "$d" strict
 	[ "$status" -eq 0 ]
 }
+
+@test "zl_switch_state возвращает прежнее значение, если служба не поднялась" {
+	# Опечатка в имени интерфейса оставляла службу остановленной:
+	# "wan-iface ens32" вместо "ens33" ломало обход необратимо.
+	# Ветка отката достижима только когда мы управляем systemd, то есть
+	# вне префикса и при живом /run/systemd/system. В контейнере без
+	# systemd проверять нечего.
+	[ -d /run/systemd/system ] || skip "нет systemd: ветка недостижима"
+
+	local f="$BATS_TEST_TMPDIR/state" bin="$BATS_TEST_TMPDIR/bin"
+	mkdir -p "$bin"
+	printf 'старое\n' >"$f"
+
+	# systemctl, который считает службу активной, останавливается
+	# успешно, но запуститься отказывается.
+	cat >"$bin/systemctl" <<'SYS'
+#!/bin/sh
+case "$1" in
+  is-active) exit 0 ;;
+  start)     exit 1 ;;
+esac
+exit 0
+SYS
+	chmod +x "$bin/systemctl"
+
+	ZL_PREFIX='' PATH="$bin:$PATH" run zl_switch_state "$f" "новое"
+	[ "$status" -ne 0 ]
+	[ "$(cat "$f")" = "старое" ]
+	[[ "$output" == *"не запустилась"* ]]
+}
+
+# --- очередь nfqueue --------------------------------------------------
+#
+# Эти тесты написаны ДО реализации. Задача: отличить "служба активна" от
+# "nfqws действительно подключён к очереди". Между ними помещается целый
+# класс тихих отказов, которых doctor пока не видит.
+
+@test "zl_queue_attached видит подключённую очередь" {
+	local f="$BATS_TEST_TMPDIR/nfq"
+	# Формат ядра: queue_number portid queue_total copy_mode copy_range
+	#              queue_dropped user_dropped id_sequence
+	printf '  200  1297     0 2 65531     0     0        1  1\n' >"$f"
+	run zl_queue_attached 200 "$f"
+	[ "$status" -eq 0 ]
+}
+
+@test "zl_queue_attached не путает похожие номера очередей" {
+	local f="$BATS_TEST_TMPDIR/nfq2"
+	printf ' 2001  1297     0 2 65531     0     0        1  1\n' >"$f"
+	run zl_queue_attached 200 "$f"
+	[ "$status" -ne 0 ]
+	run zl_queue_attached 2001 "$f"
+	[ "$status" -eq 0 ]
+}
+
+@test "zl_queue_attached отвергает пустой файл" {
+	local f="$BATS_TEST_TMPDIR/nfq3"
+	: >"$f"
+	run zl_queue_attached 200 "$f"
+	[ "$status" -ne 0 ]
+}
+
+@test "zl_queue_attached различает отсутствие файла и отсутствие очереди" {
+	# Файл читается только root; от обычного пользователя его нет, и это
+	# не то же самое, что "очередь не подключена". Код 2 - неизвестно.
+	run zl_queue_attached 200 "$BATS_TEST_TMPDIR/нет-файла"
+	[ "$status" -eq 2 ]
+}
+
+@test "zl_queue_attached находит очередь среди нескольких" {
+	local f="$BATS_TEST_TMPDIR/nfq4"
+	printf '  100  1111     0 2 65531     0     0        1  1\n' >"$f"
+	printf '  200  1297     3 2 65531     0     0        7  1\n' >>"$f"
+	printf '  300  1555     0 2 65531     0     0        1  1\n' >>"$f"
+	run zl_queue_attached 200 "$f"
+	[ "$status" -eq 0 ]
+	run zl_queue_attached 400 "$f"
+	[ "$status" -ne 0 ]
+}
+
+@test "подсказка по установке соответствует менеджеру пакетов" {
+	# Совет "sudo apt install" на Arch или Fedora бесполезен.
+	local bin="$BATS_TEST_TMPDIR/pm"
+	mkdir -p "$bin"
+
+	for pm in apt-get:apt dnf:dnf pacman:pacman zypper:zypper; do
+		rm -f "$bin"/*
+		printf '#!/bin/sh\nexit 0\n' >"$bin/${pm%%:*}"
+		chmod +x "$bin/${pm%%:*}"
+		PATH="$bin" run zl_install_hint 'iptables ipset'
+		[[ "$output" == *"${pm##*:}"* ]] \
+			|| { echo "для ${pm%%:*} подсказка: $output"; return 1; }
+	done
+
+	# Ни одного известного менеджера - общая формулировка без команды.
+	rm -f "$bin"/*
+	PATH="$bin" run zl_install_hint nftables
+	[[ "$output" == *"средствами вашего дистрибутива"* ]]
+}

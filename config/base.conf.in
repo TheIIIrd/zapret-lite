@@ -40,8 +40,8 @@ ZAPRET_LOCAL_LISTS_DIR="$ZAPRET_LITE_ETC/lists"
 GAME_FILTER_TCP=12
 GAME_FILTER_UDP=12
 
-if [ -r "$ZAPRET_LITE_ETC/game-filter.mode" ]; then
-	read ZAPRET_GAME_FILTER_MODE <"$ZAPRET_LITE_ETC/game-filter.mode"
+if [ -r "$ZAPRET_LITE_ETC/game-filter" ]; then
+	read ZAPRET_GAME_FILTER_MODE <"$ZAPRET_LITE_ETC/game-filter"
 else
 	ZAPRET_GAME_FILTER_MODE=disabled
 fi
@@ -165,8 +165,8 @@ INIT_APPLY_FW=1
 #
 # По умолчанию выключено, как у апстрима: включение затрагивает правила
 # firewall, и решать это должен человек, а не наше предположение.
-if [ -r "$ZAPRET_LITE_ETC/ipv6.mode" ]; then
-	read ZAPRET_LITE_IPV6 <"$ZAPRET_LITE_ETC/ipv6.mode"
+if [ -r "$ZAPRET_LITE_ETC/ipv6" ]; then
+	read ZAPRET_LITE_IPV6 <"$ZAPRET_LITE_ETC/ipv6"
 else
 	ZAPRET_LITE_IPV6=off
 fi

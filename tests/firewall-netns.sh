@@ -59,14 +59,14 @@ set_state() { printf '%s\n' "$2" >"$ETC/$1"; }
 
 # Список из 32 тысяч подсетей грузится в набор десятки секунд и к делу
 # не относится: проверяются правила, а не содержимое списков.
-set_state ipset.mode none
+set_state ipset none
 printf '203.0.113.113/32\n' >"$ETC/lists/ipset-all.txt"
 
 # =====================================================================
 printf '\n=== nftables\n'
 # =====================================================================
 set_state fwtype nftables
-set_state ipv6.mode off
+set_state ipv6 off
 ns_reset
 
 [ "$(nft_chains)" = 0 ] && ok "до старта цепочек нет" || bad "namespace не чист"
@@ -86,7 +86,7 @@ printf '\n=== iptables\n'
 # например, рядом с WireGuard. Требует пакета ipset.
 if command -v ipset >/dev/null 2>&1 && command -v iptables >/dev/null 2>&1; then
 	set_state fwtype iptables
-	set_state ipv6.mode off
+	set_state ipv6 off
 	ns_reset
 
 	zapret_do start
@@ -110,7 +110,7 @@ printf '\n=== IPv6 в режиме iptables\n'
 # иначе снимаются не те правила, что ставились.
 if command -v ipset >/dev/null 2>&1 && command -v ip6tables >/dev/null 2>&1; then
 	set_state fwtype iptables
-	set_state ipv6.mode on
+	set_state ipv6 on
 	ns_reset
 
 	zapret_do start
@@ -128,9 +128,9 @@ if command -v ipset >/dev/null 2>&1 && command -v ip6tables >/dev/null 2>&1; the
 	# остановки, правила осиротеют. Тест закрепляет, что обходной путь
 	# в zl_switch_state всё ещё нужен.
 	ns_reset
-	set_state ipv6.mode on
+	set_state ipv6 on
 	zapret_do start
-	set_state ipv6.mode off
+	set_state ipv6 off
 	zapret_do stop
 	n=$(ipt6_rules)
 	if [ "$n" -gt 0 ]; then
