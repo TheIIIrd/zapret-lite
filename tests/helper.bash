@@ -39,11 +39,17 @@ setup_root() {
 # установщик справедливо откажется работать.
 make_fakebin() {
 	mkdir -p "$BATS_TEST_TMPDIR/fakebin"
-	cat >"$BATS_TEST_TMPDIR/fakebin/nft" <<'EOF'
+	# nft, iptables, ip6tables и ipset подменяются заглушками: выбор типа
+	# firewall проверяет наличие команд, а режим iptables требует ещё и
+	# ipset (common/installer.sh:633). Настоящие команды тестам не нужны,
+	# правила здесь никто не применяет.
+	for c in nft iptables ip6tables ipset; do
+		cat >"$BATS_TEST_TMPDIR/fakebin/$c" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-	chmod +x "$BATS_TEST_TMPDIR/fakebin/nft"
+		chmod +x "$BATS_TEST_TMPDIR/fakebin/$c"
+	done
 }
 
 # Собирает комплект для установки: наши файлы + vendor из указанного

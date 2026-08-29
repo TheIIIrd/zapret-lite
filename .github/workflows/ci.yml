@@ -53,7 +53,8 @@ jobs:
         # A && B || C) полезны, но валить из-за них сборку не стоит.
         run: |
           shellcheck -x -s sh -e SC2329 --severity=warning \
-            install.sh uninstall.sh bin/zapret-lite lib/common.sh tests/vm-check.sh
+            install.sh uninstall.sh bin/zapret-lite lib/common.sh \
+            tests/vm-check.sh tests/firewall-netns.sh
           echo "--- замечания уровня info (не влияют на результат):"
           shellcheck -x -s sh -e SC2329 \
             install.sh uninstall.sh bin/zapret-lite lib/common.sh || true
@@ -94,11 +95,18 @@ jobs:
                 install.sh uninstall.sh /tmp/pkg/
           python3 tools/make-package-manifest.py /tmp/pkg
           python3 tools/make-package-manifest.py /tmp/pkg --check
-          # Подмена обязана обнаруживаться.
+
+          # Негативная проверка: подмена обязана обнаруживаться.
+          # Строка "[ - ] изменён: strategies/general.conf" ниже - это
+          # ОЖИДАЕМЫЙ результат, а не сбой. Без него шаг падает.
+          echo
+          echo "--- дальше стратегия портится намеренно;"
+          echo "--- сообщение об изменении ниже означает, что защита работает"
           echo '# tampered' >> /tmp/pkg/strategies/general.conf
           if python3 tools/make-package-manifest.py /tmp/pkg --check; then
             echo "::error::подмена стратегии не обнаружена"; exit 1
           fi
+          echo "--- подмена обнаружена, как и требовалось"
 
   strategies:
     runs-on: ubuntu-latest
@@ -211,6 +219,61 @@ jobs:
         # дефектов.
         run: |
           for f in tests/lib.bats tests/converter.bats \
-                   tests/install.bats tests/manager.bats; do
+                   tests/install.bats tests/manager.bats \
+                   tests/firewall-netns.sh tests/vm-check.sh; do
             [ -s "$f" ] || { echo "::error::нет $f"; exit 1; }
           done
+
+  firewall:
+    # Единственный класс дефектов, который нельзя поймать без прав на
+    # сеть: правила применяются, но не снимаются. Проект спотыкался на
+    # нём трижды - осиротевшая таблица nft, смена типа firewall,
+    # выключение IPv6 в режиме iptables.
+    #
+    # Runner'ы GitHub - виртуальные машины, а не контейнеры, поэтому
+    # sudo даёт полный root. Контейнер с --cap-add не нужен: хватает
+    # "ip netns", который изолирует проверку от сети самого runner'а.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Зависимости
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list \
+                     /etc/apt/sources.list.d/azure*.list
+          sudo apt-get update -qq
+          # ipset нужен режиму iptables: create_ipset.sh вызывает
+          # "ipset -! restore", и без него правила не применяются.
+          sudo apt-get install -y -qq make gcc zlib1g-dev libcap-dev \
+            libnetfilter-queue-dev libmnl-dev libsystemd-dev \
+            nftables iptables ipset iproute2
+
+      - name: Собрать nfqws и комплект
+        run: |
+          set -eu
+          ZAPRET_REF=$(sed -n 's/^zapret_ref=//p' vendor/zapret/zapret.lock)
+          git clone --quiet https://github.com/bol-van/zapret /tmp/zapret
+          git -C /tmp/zapret checkout --quiet "$ZAPRET_REF"
+          make -C /tmp/zapret systemd
+
+          mkdir -p /tmp/pkg
+          cp -r bin lib config systemd strategies vendor tools \
+                install.sh uninstall.sh /tmp/pkg/
+          mkdir -p /tmp/pkg/zapret
+          ( cd /tmp/zapret && tar -cf - --exclude=./.git --exclude=./.github \
+              --exclude=./config . ) \
+            | tar -xf - -C /tmp/pkg/zapret
+          cp vendor/zapret/zapret.lock /tmp/pkg/zapret/
+
+          # Манифест строится и здесь: иначе установка идёт по пути "из
+          # дерева репозитория" и проверку целостности не исполняет
+          # вовсе, а именно она защищает strategies/*.conf - shell-код,
+          # читаемый от root.
+          python3 tools/make-package-manifest.py /tmp/pkg
+
+          # Установка в префикс: systemd не задействуется, служба не
+          # регистрируется, сеть runner'а не затрагивается.
+          ZL_PREFIX=/tmp/zlroot sh /tmp/pkg/install.sh --strategy general
+
+      - name: Правила применяются и снимаются симметрично
+        run: sudo sh tests/firewall-netns.sh /tmp/zlroot

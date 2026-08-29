@@ -132,3 +132,69 @@ setup() {
 	ZL_PREFIX=/tmp/somewhere run zl_require_root
 	[ "$status" -eq 0 ]
 }
+
+@test "zl_switch_state пишет значение и не требует systemd в префиксе" {
+	local f="$BATS_TEST_TMPDIR/state"
+	mkdir -p "$(dirname "$f")"
+	run zl_switch_state "$f" "значение"
+	[ "$status" -eq 0 ]
+	[ "$(cat "$f")" = "значение" ]
+	[ "$(stat -c '%a' "$f")" = "644" ]
+}
+
+@test "zl_virt_breaks_bypass знает проблемные гипервизоры" {
+	# VMware и VirtualBox с внутренним NAT ломают большинство техник
+	# обхода (апстрим предупреждает об этом в common/virt.sh:24).
+	for v in vmware oracle virtualbox vmw; do
+		zl_virt_breaks_bypass "$v" || { echo "не распознан: $v"; return 1; }
+	done
+	for v in kvm qemu xen none ""; do
+		if zl_virt_breaks_bypass "$v"; then
+			echo "ложное срабатывание: $v"
+			return 1
+		fi
+	done
+}
+
+@test "оба обходчика видят одинаковый набор файлов" {
+	# Список исключений продублирован в двух местах: SKIP_DIRS в
+	# tools/make-package-manifest.py и find в zl_verify_manifest.
+	# Однажды они разошлись по ГЛУБИНЕ: python пропускал .github на
+	# любом уровне, shell - только на верхнем. Файлы zapret/.github/*
+	# попали в проверку, но не в манифест, и установка обрывалась на
+	# "лишних файлах". Здесь оба обходчика натравливаются на дерево со
+	# всеми ловушками сразу.
+	local d="$BATS_TEST_TMPDIR/tree"
+	mkdir -p "$d/bin" "$d/lib" \
+	         "$d/.github/workflows" "$d/tests" "$d/dist" "$d/.git/objects" \
+	         "$d/zapret/.github/workflows" "$d/zapret/tests" \
+	         "$d/zapret/.git" "$d/zapret/common" \
+	         "$d/tools/__pycache__"
+	printf 'x\n' >"$d/bin/zapret-lite"
+	printf 'x\n' >"$d/lib/common.sh"
+	printf 'x\n' >"$d/.github/workflows/ci.yml"
+	printf 'x\n' >"$d/tests/a.bats"
+	printf 'x\n' >"$d/dist/a.tar.gz"
+	printf 'x\n' >"$d/.git/objects/aa"
+	printf 'x\n' >"$d/zapret/.github/workflows/build.yml"
+	printf 'x\n' >"$d/zapret/tests/t.sh"
+	printf 'x\n' >"$d/zapret/.git/HEAD"
+	printf 'x\n' >"$d/zapret/common/base.sh"
+	printf 'x\n' >"$d/tools/__pycache__/m.pyc"
+	printf 'x\n' >"$d/tools/m.py"
+
+	python3 "$REPO/tools/make-package-manifest.py" "$d" >/dev/null
+	sed 's/^[0-9a-f]*  //' "$d/MANIFEST.sha256" | sort >"$BATS_TEST_TMPDIR/py"
+
+	( cd "$d" && find . -type f \
+	    ! -path '*/.git/*' ! -path '*/.github/*' ! -path '*/tests/*' \
+	    ! -path '*/dist/*' ! -name '*.pyc' ! -path '*/__pycache__/*' \
+	    ! -name MANIFEST.sha256 -printf '%P\n' ) | sort >"$BATS_TEST_TMPDIR/sh"
+
+	run diff "$BATS_TEST_TMPDIR/py" "$BATS_TEST_TMPDIR/sh"
+	[ "$status" -eq 0 ]
+
+	# И сама проверка на таком дереве обязана пройти.
+	run zl_verify_manifest "$d" strict
+	[ "$status" -eq 0 ]
+}

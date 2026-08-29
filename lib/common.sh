@@ -89,9 +89,14 @@ zl_verify_manifest() {
 	sed 's/^[0-9a-f]*  //' "$dir/MANIFEST.sha256" | sort >"$listed"
 	# Каталоги, которых в релизном комплекте не бывает. При установке из
 	# дерева репозитория они есть и лишними не считаются.
+	# Список исключений обязан совпадать со SKIP_DIRS в
+	# tools/make-package-manifest.py, причём и по глубине: там пропуск
+	# работает на любом уровне вложенности, значит и здесь тоже.
+	# Когда правила разошлись, файлы zapret/.github/* попали в проверку,
+	# но не в манифест, и установка обрывалась на "лишних файлах".
 	( cd "$dir" && find . -type f \
-	    ! -path './.git/*' ! -path './.github/*' ! -path './tests/*' \
-	    ! -path './dist/*' ! -name '*.pyc' ! -path '*/__pycache__/*' \
+	    ! -path '*/.git/*' ! -path '*/.github/*' ! -path '*/tests/*' \
+	    ! -path '*/dist/*' ! -name '*.pyc' ! -path '*/__pycache__/*' \
 	    ! -name MANIFEST.sha256 -printf '%P\n' ) | sort >"$present"
 
 	extra="$(comm -13 "$listed" "$present")"
@@ -166,6 +171,107 @@ zl_detect_fwtype() {
 	else
 		echo ""
 	fi
+}
+
+# Доступен ли выбранный тип firewall на этой машине.
+#
+# Режим iptables требует не только сам iptables, но и ipset: апстрим
+# перечисляет их вместе в списке зависимостей (common/installer.sh:633),
+# а create_ipset.sh вызывает "ipset -! restore". В Debian и производных
+# пакет ipset по умолчанию не стоит, и без него правила не применяются -
+# служба стартует, а обхода нет.
+zl_fwtype_available() {
+	# $1 - iptables | nftables | auto
+	local missing=
+	case "$1" in
+		nftables)
+			zl_have nft || missing="nft"
+			;;
+		iptables)
+			zl_have iptables || missing="iptables"
+			zl_have ip6tables || missing="${missing:+$missing }ip6tables"
+			zl_have ipset || missing="${missing:+$missing }ipset"
+			;;
+		*)
+			return 0
+			;;
+	esac
+	[ -z "$missing" ] && return 0
+	zl_error "для режима $1 не хватает команд: $missing"
+	case "$1" in
+		iptables)
+			zl_error "Установите пакеты и повторите, например:"
+			zl_error "  sudo apt install iptables ipset"
+			;;
+		nftables)
+			zl_error "Установите пакет nftables и повторите."
+			;;
+	esac
+	return 1
+}
+
+# Меняет переключатель, влияющий на СОСТАВ правил firewall.
+#
+# Обычный restart здесь не годится: ExecStop читает конфиг заново, уже с
+# новым значением, и zapret снимает не те правила, что ставил. Старые
+# остаются висеть, а снять их нечем - каталог к тому времени описывает
+# другую конфигурацию.
+#
+# Так уже случилось с типом firewall (снимал бы правила не в той
+# подсистеме) и так же вело бы себя выключение IPv6 в режиме iptables:
+# добавление и удаление идут через один и тот же
+# [ "$DISABLE_IPV6" = 1 ] || (common/ipt.sh:413).
+#
+# Поэтому: остановить старым конфигом, записать, запустить новым.
+zl_switch_state() {
+	# $1 - файл состояния, $2 - новое значение
+	local file="$1" value="$2" was_active=0
+
+	if zl_manage_systemd && systemctl is-active --quiet zapret 2>/dev/null; then
+		was_active=1
+		systemctl stop zapret \
+			|| zl_die "не удалось остановить службу; значение не изменено"
+	fi
+
+	printf '%s\n' "$value" >"$file"
+	chmod 0644 "$file"
+
+	[ "$was_active" = 1 ] || return 0
+	if systemctl start zapret; then
+		return 0
+	fi
+	zl_error "служба не запустилась. Смотрите: journalctl -u zapret -n 50"
+	return 1
+}
+
+# Гипервизор, если машина виртуальная.
+#
+# Апстрим предупреждает об этом не зря (common/virt.sh:24): VMware и
+# VirtualBox с внутренним NAT ломают большинство техник обхода. Человек
+# перебирает двадцать стратегий, ни одна не работает, и причина вовсе
+# не в них. Мост вместо NAT обычно решает.
+zl_detect_virt() {
+	# Инициализация обязательна: в dash "local vm" оставляет переменную
+	# неустановленной, и под set -u обращение к ней роняет скрипт. Это
+	# всплыло на машине без systemd-detect-virt.
+	local vm='' s='' v=''
+	if zl_have systemd-detect-virt; then
+		vm=$(systemd-detect-virt --vm 2>/dev/null) || vm=
+	elif [ -r /sys/class/dmi/id/product_name ]; then
+		read -r s </sys/class/dmi/id/product_name || s=
+		for v in KVM QEMU VMware VMW VirtualBox Xen Bochs Parallels BHYVE Hyper-V; do
+			case "$s" in "$v"*) vm="$v"; break ;; esac
+		done
+	fi
+	printf '%s' "$vm" | tr '[:upper:]' '[:lower:]'
+}
+
+# Известно ли, что этот гипервизор мешает обходу.
+zl_virt_breaks_bypass() {
+	case "$1" in
+		vmware|oracle|virtualbox|vmw*) return 0 ;;
+		*) return 1 ;;
+	esac
 }
 
 zl_systemd_ok() {

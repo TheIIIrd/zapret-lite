@@ -89,7 +89,12 @@ cmd_status() {
 	strat=$(current_strategy)
 	mode=$(read_state "$ZL_ETC/ipset.mode" loaded)
 	game=$(read_state "$ZL_ETC/game-filter.mode" disabled)
-	fw=$(zl_detect_fwtype)
+	# Показываем зафиксированный выбор, а не автоопределение: иначе
+	# после "fwtype iptables" status продолжал уверять, что nftables.
+	fw=$(read_state "$ZL_ETC/fwtype" auto)
+	if [ "$fw" = auto ]; then
+		fw="$(zl_detect_fwtype) (авто)"
+	fi
 
 	if zl_manage_systemd && systemctl is-active --quiet zapret 2>/dev/null; then
 		active="работает"
@@ -148,15 +153,15 @@ cmd_use() {
 	[ -r "$ZL_CURRENT/strategies/$name.conf" ] \
 		|| zl_die "нет стратегии '$name' в текущем поколении. Список: zapret-lite list"
 
-	printf '%s\n' "$name" >"$ZL_ETC/strategy"
-	chmod 0644 "$ZL_ETC/strategy"
+	# Смена стратегии меняет NFQWS_PORTS_*. В режиме iptables правила
+	# снимаются по списку портов из текущего конфига, поэтому менять
+	# его до остановки нельзя: правила старых портов остались бы висеть.
+	zl_switch_state "$ZL_ETC/strategy" "$name" || return 1
 	zl_info "выбрана стратегия: $name"
-	# Смена стратегии меняет NFQWS_PORTS_*, а значит и правила firewall.
-	restart_service
 }
 
 cmd_rollback() {
-	local target cur strat
+	local target cur strat was_active
 	cur=$(zl_generation_current 2>/dev/null) || cur=
 
 	if [ $# -gt 0 ]; then
@@ -171,6 +176,16 @@ cmd_rollback() {
 	[ "$target" = "$cur" ] && zl_die "поколение $target уже текущее"
 
 	zl_info "откат: $cur -> $target"
+
+	# Останавливаем ДО переключения поколения: у нового поколения могут
+	# быть другие порты, и снятие правил по ним оставило бы старые
+	# висеть. Тот же случай, что со сменой стратегии и типа firewall.
+	was_active=0
+	if zl_manage_systemd && systemctl is-active --quiet zapret 2>/dev/null; then
+		was_active=1
+		systemctl stop zapret || zl_die "не удалось остановить службу; откат отменён"
+	fi
+
 	zl_generation_switch "$target" || exit 1
 
 	# Списки и фейки поехали назад вместе с поколением, значит и
@@ -185,7 +200,10 @@ cmd_rollback() {
 		zl_warn "Выберите другую: zapret-lite list && zapret-lite use <имя>"
 	fi
 
-	restart_service
+	if [ "$was_active" = 1 ] && ! systemctl start zapret; then
+		zl_error "служба не запустилась. Смотрите: journalctl -u zapret -n 50"
+		return 1
+	fi
 	zl_info "откат завершён. Вернуться: zapret-lite rollback $cur"
 }
 
@@ -236,11 +254,8 @@ EOF
 	esac
 
 	zl_require_root
-	printf '%s\n' "$mode" >"$ZL_ETC/game-filter.mode"
-	chmod 0644 "$ZL_ETC/game-filter.mode"
+	zl_switch_state "$ZL_ETC/game-filter.mode" "$mode" || return 1
 	zl_info "игровой фильтр: $mode"
-	# Меняет NFQWS_PORTS_*, значит меняет правила firewall.
-	restart_service
 }
 
 
@@ -267,11 +282,11 @@ EOF
 	esac
 
 	zl_require_root
-	printf '%s\n' "$mode" >"$ZL_ETC/ipv6.mode"
-	chmod 0644 "$ZL_ETC/ipv6.mode"
+	# Не restart: в режиме iptables снятие правил IPv6 зависит от того
+	# же DISABLE_IPV6, поэтому выключение через restart оставило бы их
+	# висеть.
+	zl_switch_state "$ZL_ETC/ipv6.mode" "$mode" || return 1
 	zl_info "IPv6: $mode"
-	# Меняется набор правил firewall, значит нужен перезапуск.
-	restart_service
 }
 
 cmd_fwtype() {
@@ -298,11 +313,9 @@ EOF
 	esac
 
 	zl_require_root
-	printf '%s\n' "$mode" >"$ZL_ETC/fwtype"
-	chmod 0644 "$ZL_ETC/fwtype"
+	zl_fwtype_available "$mode" || exit 1
+	zl_switch_state "$ZL_ETC/fwtype" "$mode" || return 1
 	zl_info "тип firewall: $mode"
-	# Меняется весь набор правил, причём в другой подсистеме.
-	restart_service
 }
 
 cmd_wan_iface() {
@@ -335,11 +348,8 @@ EOF
 				|| zl_warn "интерфейса '$i' сейчас нет - правила его не найдут"
 		done
 	fi
-	printf '%s\n' "$iface" >"$ZL_ETC/wan-iface"
-	chmod 0644 "$ZL_ETC/wan-iface"
+	zl_switch_state "$ZL_ETC/wan-iface" "$iface" || return 1
 	zl_info "интерфейс: $iface"
-	# Правила получают привязку oifname, значит перестраиваются.
-	restart_service
 }
 
 # --- диагностика ------------------------------------------------------
@@ -352,7 +362,7 @@ d_warn() { printf '  [ ! ] %s\n' "$*"; DOCTOR_WARN=$((DOCTOR_WARN + 1)); }
 d_bad()  { printf '  [ - ] %s\n' "$*"; DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); }
 
 cmd_doctor() {
-	local gen strat fw n missing bin out mode p dis6
+	local gen strat fw n missing bin out mode p dis6 want virt
 
 	printf '\n--- Окружение\n'
 	if [ -n "$ZL_PREFIX" ]; then
@@ -370,6 +380,17 @@ cmd_doctor() {
 		d_ok "firewall: $fw (автоопределение)"
 	else
 		d_bad "не найдены ни nft, ни iptables"
+	fi
+
+	virt=$(zl_detect_virt)
+	if [ -n "$virt" ] && [ "$virt" != none ]; then
+		if zl_virt_breaks_bypass "$virt"; then
+			d_warn "виртуализация $virt: её внутренний NAT ломает
+        большинство техник обхода. Если стратегии перебираются
+        безрезультатно, переключите сеть машины с NAT на мост."
+		else
+			d_ok "виртуализация: $virt"
+		fi
 	fi
 
 	if [ -r /proc/net/netfilter/nfnetlink_queue ]; then
@@ -516,6 +537,32 @@ cmd_doctor() {
 			[ "$(stat -c '%U' "$p" 2>/dev/null)" = root ] \
 				|| d_bad "$p принадлежит не root"
 		done
+	fi
+
+	# Служба может считаться работающей, а правил в выбранной подсистеме
+	# не быть - именно так выглядит нехватка ipset для режима iptables.
+	if [ "$(id -u)" = 0 ] && [ -z "$ZL_PREFIX" ] && zl_manage_systemd &&
+	   systemctl is-active --quiet zapret 2>/dev/null; then
+		want=$(read_state "$ZL_ETC/fwtype" auto)
+		[ "$want" = auto ] && want=$(zl_detect_fwtype)
+		case "$want" in
+			nftables)
+				if nft list table inet zapret 2>/dev/null | grep -q 'queue'; then
+					d_ok "правила nftables на месте"
+				else
+					d_bad "служба работает, но правил nftables нет"
+				fi
+				;;
+			iptables)
+				if iptables-save 2>/dev/null | grep -q NFQUEUE; then
+					d_ok "правила iptables на месте"
+				else
+					d_bad "служба работает, но правил iptables нет.
+        Режиму iptables нужны пакеты iptables и ipset;
+        подробности: journalctl -u zapret -n 50"
+				fi
+				;;
+		esac
 	fi
 
 	printf '\n--- Служба\n'
