@@ -89,7 +89,10 @@ zapret-lite ipv6 <режим>        on | off
 zapret-lite fwtype <тип>        auto | iptables | nftables
 zapret-lite wan-iface <имя>     только этот интерфейс, any — все
 zapret-lite check-update        есть ли новые стратегии
+zapret-lite restart             перезапустить службу
 ```
+
+Команды, меняющие состояние, требуют `sudo`; чтение — нет.
 
 Если что-то не работает, начинайте с `zapret-lite doctor`. Он проверяет
 окружение, целостность установки, конфигурацию, списки, права и службу —
