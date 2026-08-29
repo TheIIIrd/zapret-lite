@@ -277,3 +277,23 @@ SYS
 	run zl_queue_attached 400 "$f"
 	[ "$status" -ne 0 ]
 }
+
+@test "подсказка по установке соответствует менеджеру пакетов" {
+	# Совет "sudo apt install" на Arch или Fedora бесполезен.
+	local bin="$BATS_TEST_TMPDIR/pm"
+	mkdir -p "$bin"
+
+	for pm in apt-get:apt dnf:dnf pacman:pacman zypper:zypper; do
+		rm -f "$bin"/*
+		printf '#!/bin/sh\nexit 0\n' >"$bin/${pm%%:*}"
+		chmod +x "$bin/${pm%%:*}"
+		PATH="$bin" run zl_install_hint 'iptables ipset'
+		[[ "$output" == *"${pm##*:}"* ]] \
+			|| { echo "для ${pm%%:*} подсказка: $output"; return 1; }
+	done
+
+	# Ни одного известного менеджера - общая формулировка без команды.
+	rm -f "$bin"/*
+	PATH="$bin" run zl_install_hint nftables
+	[[ "$output" == *"средствами вашего дистрибутива"* ]]
+}

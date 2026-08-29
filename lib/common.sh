@@ -199,15 +199,31 @@ zl_fwtype_available() {
 	[ -z "$missing" ] && return 0
 	zl_error "для режима $1 не хватает команд: $missing"
 	case "$1" in
-		iptables)
-			zl_error "Установите пакеты и повторите, например:"
-			zl_error "  sudo apt install iptables ipset"
-			;;
-		nftables)
-			zl_error "Установите пакет nftables и повторите."
-			;;
+		iptables) zl_error "$(zl_install_hint 'iptables ipset')" ;;
+		nftables) zl_error "$(zl_install_hint nftables)" ;;
 	esac
 	return 1
+}
+
+# Подсказка по установке пакетов для текущего дистрибутива.
+#
+# Совет "sudo apt install" на Arch или Fedora бесполезен, а проект
+# заявлен для Debian, Ubuntu, Mint, RHEL, Fedora, openSUSE и Arch.
+# Определяем по наличию менеджера пакетов, а не по /etc/os-release:
+# производных дистрибутивов слишком много, чтобы перечислять их имена.
+zl_install_hint() {
+	# $1 - имена пакетов через пробел
+	if zl_have apt-get; then
+		printf 'Установите и повторите: sudo apt install %s' "$1"
+	elif zl_have dnf; then
+		printf 'Установите и повторите: sudo dnf install %s' "$1"
+	elif zl_have pacman; then
+		printf 'Установите и повторите: sudo pacman -S %s' "$1"
+	elif zl_have zypper; then
+		printf 'Установите и повторите: sudo zypper install %s' "$1"
+	else
+		printf 'Установите пакеты (%s) средствами вашего дистрибутива' "$1"
+	fi
 }
 
 # Меняет переключатель, влияющий на СОСТАВ правил firewall.

@@ -206,8 +206,12 @@ sudo zapret-lite fwtype iptables
 выглядит это как «переключил, но ничего не изменилось».
 
 ```sh
-sudo apt install iptables ipset
+sudo apt install iptables ipset        # Debian, Ubuntu, Mint
+sudo pacman -S iptables ipset          # Arch
+sudo dnf install iptables ipset        # Fedora, RHEL
 ```
+
+`zapret-lite fwtype` подскажет команду для вашего дистрибутива сам.
 
 `zapret-lite fwtype` откажется переключаться, если чего-то не хватает,
 и назовёт недостающие команды. `zapret-lite doctor` отдельно проверяет,
