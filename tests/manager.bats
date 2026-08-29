@@ -742,3 +742,120 @@ PY
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"актуальная версия"* ]]
 }
+
+@test "status показывает зафиксированный тип, а не автоопределение" {
+	# Именно здесь была путаница: fwtype говорил "поменял", а status
+	# продолжал уверять, что nftables.
+	zl fwtype nftables
+	run zl status
+	[[ "$output" == *"Firewall      : nftables"* ]]
+	[[ "$output" != *"(авто)"* ]]
+
+	zl fwtype auto
+	run zl status
+	[[ "$output" == *"(авто)"* ]]
+}
+
+@test "fwtype отказывает, если для режима не хватает команд" {
+	local nosys="$BATS_TEST_TMPDIR/noipset" p c
+	mkdir -p "$nosys"
+	for c in sh dash cp mv rm ln find sed grep awk sort comm head tail cat \
+	         cut mkdir rmdir chmod chown install sha256sum stat date \
+	         basename dirname readlink xargs ls du df tr wc id uname \
+	         mktemp python3 tar seq nft; do
+		p=$(command -v "$c" 2>/dev/null) || continue
+		[ -x "$p" ] || continue
+		ln -sf "$p" "$nosys/$c"
+	done
+	# iptables и ipset намеренно отсутствуют.
+	PATH="$nosys" run zl fwtype iptables
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"не хватает команд"* ]]
+	[[ "$output" == *"ipset"* ]]
+	# Значение не должно измениться от неудачной попытки.
+	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/fwtype")" = "auto" ]
+}
+
+@test "установщик отказывает при недоступном типе firewall" {
+	local nosys="$BATS_TEST_TMPDIR/noipset2" p c
+	mkdir -p "$nosys"
+	for c in sh dash cp mv rm ln find sed grep awk sort comm head tail cat \
+	         cut mkdir rmdir chmod chown install sha256sum stat date \
+	         basename dirname readlink xargs ls du df tr wc id uname \
+	         mktemp python3 tar seq nft; do
+		p=$(command -v "$c" 2>/dev/null) || continue
+		[ -x "$p" ] || continue
+		ln -sf "$p" "$nosys/$c"
+	done
+	run env PATH="$nosys" sh -c "cd '$PKG' && sh ./install.sh --fwtype iptables"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"не хватает команд"* ]]
+}
+
+@test "переключатели, меняющие состав правил, идут через zl_switch_state" {
+	# Обычный restart здесь опасен: ExecStop читает конфиг заново, уже с
+	# новым значением, и zapret снимает не те правила, что ставил.
+	# Так уже случилось с fwtype и так же вело бы себя выключение IPv6
+	# в режиме iptables.
+	local mgr="$REPO/bin/zapret-lite" fn
+	for fn in cmd_fwtype cmd_ipv6 cmd_game_filter cmd_wan_iface cmd_use; do
+		sed -n "/^$fn()/,/^}/p" "$mgr" >"$BATS_TEST_TMPDIR/f"
+		grep -q 'zl_switch_state' "$BATS_TEST_TMPDIR/f" \
+			|| { echo "$fn не использует zl_switch_state"; return 1; }
+		grep -q 'restart_service' "$BATS_TEST_TMPDIR/f" \
+			&& { echo "$fn всё ещё вызывает restart_service"; return 1; }
+	done
+	# ipset - исключение: список перечитывается по mtime, правила
+	# не меняются, перезапуск не нужен вовсе.
+	sed -n '/^cmd_ipset()/,/^}/p' "$mgr" >"$BATS_TEST_TMPDIR/f"
+	! grep -q 'zl_switch_state\|restart_service' "$BATS_TEST_TMPDIR/f"
+}
+
+@test "doctor сообщает о виртуализации" {
+	run zl doctor
+	[[ "$output" == *"виртуализац"* ]]
+}
+
+@test "отказ по зависимостям firewall происходит до изменений в системе" {
+	# Раньше проверка стояла после остановки службы, копирования zapret
+	# и сборки поколения: установщик отказывал, оставив систему без
+	# работающего обхода.
+	local nosys="$BATS_TEST_TMPDIR/nodeps" p c fresh
+	mkdir -p "$nosys"
+	for c in sh dash cp mv rm ln find sed grep awk sort comm head tail cat \
+	         cut mkdir rmdir chmod chown install sha256sum stat date \
+	         basename dirname readlink xargs ls du df tr wc id uname \
+	         mktemp python3 tar seq iptables ip6tables; do
+		p=$(command -v "$c" 2>/dev/null) || continue
+		[ -x "$p" ] || continue
+		ln -sf "$p" "$nosys/$c"
+	done
+	# ipset и nft отсутствуют: остаётся только недоступный iptables.
+
+	fresh="$BATS_TEST_TMPDIR/fresh"
+	run env ZL_PREFIX="$fresh" PATH="$nosys" \
+		sh -c "cd '$PKG' && sh ./install.sh --strategy general --fwtype iptables"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"не хватает команд"* ]]
+
+	# Ни одного файла создано быть не должно. Каталога может не быть
+	# вовсе - тогда find ругается, и его вывод нельзя путать с файлами.
+	if [ -d "$fresh" ]; then
+		run find "$fresh" -type f
+		[ -z "$output" ] || { echo "созданы файлы: $output"; return 1; }
+	fi
+}
+
+@test "определение виртуализации не падает без systemd-detect-virt" {
+	# В dash "local vm" оставляет переменную неустановленной, и под
+	# set -u обращение к ней роняет скрипт.
+	local nosys="$BATS_TEST_TMPDIR/novirt" p c
+	mkdir -p "$nosys"
+	for c in sh dash cat grep sed tr uname; do
+		p=$(command -v "$c" 2>/dev/null) || continue
+		[ -x "$p" ] || continue
+		ln -sf "$p" "$nosys/$c"
+	done
+	run dash -c "set -eu; . '$REPO/lib/common.sh'; PATH='$nosys'; zl_detect_virt"
+	[ "$status" -eq 0 ]
+}

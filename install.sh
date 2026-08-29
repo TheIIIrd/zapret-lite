@@ -27,6 +27,7 @@ STRATEGY_EXPLICIT=0
 IPV6_MODE=
 FWTYPE_MODE=
 WAN_IFACE=
+EFFECTIVE_FWTYPE=
 DRY_RUN=0
 ZL_FORCE=0
 
@@ -111,6 +112,18 @@ if [ ! -d "$SRC/zapret/binaries" ] ||
         docs/development.md, раздел «Сборка zapret из исходников»"
 fi
 
+VIRT="$(zl_detect_virt)"
+if [ -n "$VIRT" ] && [ "$VIRT" != none ]; then
+	if zl_virt_breaks_bypass "$VIRT"; then
+		zl_warn "обнаружена виртуализация $VIRT."
+		zl_warn "Её внутренний NAT ломает большинство техник обхода:"
+		zl_warn "стратегии будут перебираться безрезультатно."
+		zl_warn "Переключите сеть виртуальной машины с NAT на мост."
+	else
+		zl_info "виртуализация: $VIRT"
+	fi
+fi
+
 FWTYPE="$(zl_detect_fwtype)"
 [ -n "$FWTYPE" ] || zl_die "не найдены ни nft, ни iptables. Установите один из них."
 zl_info "firewall: $FWTYPE (определено; зафиксировать: --fwtype)"
@@ -134,6 +147,33 @@ if ! zl_shim_is_ours && [ "$ZL_FORCE" = 0 ]; then
 	zl_error "$ZL_ZAPRET_DIR/config изменён вручную или создан не нами."
 	zl_error "Перенесите правки в $ZL_ETC/local.conf, либо запустите с --force."
 	exit 1
+fi
+
+# Тип firewall решается ЗДЕСЬ, до единого изменения в системе.
+# Раньше проверка стояла в секции 6: установщик успевал остановить
+# службу, скопировать zapret и собрать поколение, и только потом
+# отказывался. Оставлять человека без работающего обхода из-за
+# отсутствующего пакета - плохой размен.
+if [ -n "$FWTYPE_MODE" ]; then
+	case "$FWTYPE_MODE" in
+		auto|iptables|nftables) ;;
+		*) zl_die "--fwtype: допустимо auto, iptables или nftables" ;;
+	esac
+	EFFECTIVE_FWTYPE="$FWTYPE_MODE"
+elif [ -r "$ZL_ETC/fwtype" ]; then
+	read -r EFFECTIVE_FWTYPE <"$ZL_ETC/fwtype"
+else
+	EFFECTIVE_FWTYPE=auto
+fi
+# auto означает "тот, который выберет zapret", то есть определённый выше.
+[ "$EFFECTIVE_FWTYPE" = auto ] && EFFECTIVE_FWTYPE="$FWTYPE"
+zl_fwtype_available "$EFFECTIVE_FWTYPE" || exit 1
+zl_info "будет использован: $EFFECTIVE_FWTYPE"
+
+if [ -n "$WAN_IFACE" ]; then
+	case "$WAN_IFACE" in
+		*[!A-Za-z0-9._@:-\ ]*) zl_die "--wan-iface: недопустимое имя интерфейса" ;;
+	esac
 fi
 
 STRATEGY_SRC="$SRC/strategies/$STRATEGY.conf"
@@ -386,13 +426,8 @@ fi
 # Материализация ipset-all.txt делается ПОСЛЕ переключения поколения:
 # источник берётся из current. См. секцию 7.
 
-# Тип firewall. Автоопределение zapret обычно право, но на машине, где
-# правила уже живут в iptables, выбор лучше зафиксировать.
+# Тип firewall и интерфейс уже проверены в секции 1; здесь только запись.
 if [ -n "$FWTYPE_MODE" ]; then
-	case "$FWTYPE_MODE" in
-		auto|iptables|nftables) ;;
-		*) zl_die "--fwtype: допустимо auto, iptables или nftables" ;;
-	esac
 	run sh -c "echo '$FWTYPE_MODE' > '$ZL_ETC/fwtype'"
 	zl_info "тип firewall: $FWTYPE_MODE"
 elif [ -e "$ZL_ETC/fwtype" ]; then
@@ -401,12 +436,7 @@ else
 	run sh -c "echo auto > '$ZL_ETC/fwtype'"
 fi
 
-# Ограничение по интерфейсу. Без него обрабатываются все, что на машине
-# с docker и парой мостов означает лишнюю работу.
 if [ -n "$WAN_IFACE" ]; then
-	case "$WAN_IFACE" in
-		*[!A-Za-z0-9._@:-\ ]*) zl_die "--wan-iface: недопустимое имя интерфейса" ;;
-	esac
 	run sh -c "echo '$WAN_IFACE' > '$ZL_ETC/wan-iface'"
 	zl_info "интерфейс: $WAN_IFACE"
 elif [ -e "$ZL_ETC/wan-iface" ]; then

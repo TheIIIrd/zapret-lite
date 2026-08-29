@@ -132,3 +132,26 @@ setup() {
 	ZL_PREFIX=/tmp/somewhere run zl_require_root
 	[ "$status" -eq 0 ]
 }
+
+@test "zl_switch_state пишет значение и не требует systemd в префиксе" {
+	local f="$BATS_TEST_TMPDIR/state"
+	mkdir -p "$(dirname "$f")"
+	run zl_switch_state "$f" "значение"
+	[ "$status" -eq 0 ]
+	[ "$(cat "$f")" = "значение" ]
+	[ "$(stat -c '%a' "$f")" = "644" ]
+}
+
+@test "zl_virt_breaks_bypass знает проблемные гипервизоры" {
+	# VMware и VirtualBox с внутренним NAT ломают большинство техник
+	# обхода (апстрим предупреждает об этом в common/virt.sh:24).
+	for v in vmware oracle virtualbox vmw; do
+		zl_virt_breaks_bypass "$v" || { echo "не распознан: $v"; return 1; }
+	done
+	for v in kvm qemu xen none ""; do
+		if zl_virt_breaks_bypass "$v"; then
+			echo "ложное срабатывание: $v"
+			return 1
+		fi
+	done
+}
