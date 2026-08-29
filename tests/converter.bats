@@ -205,3 +205,29 @@ convert() {
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"ARGS="* ]]
 }
+
+# --- формат списков ---------------------------------------------------
+
+@test "vendor-sync приводит списки к LF, а .bin не трогает" {
+	# Два пути синхронизации брали списки из разных мест: релиз даёт
+	# CRLF, main через raw.githubusercontent - LF. Из-за этого после
+	# каждого релиза списки переворачивались, и PR показывал изменение
+	# всех 32 тысяч строк.
+	local rel="$BATS_TEST_TMPDIR/rel2" out="$BATS_TEST_TMPDIR/vendor2"
+	mkdir -p "$rel/bin" "$rel/lists"
+	printf 'a.example\r\nb.example\r\n' >"$rel/lists/list-general.txt"
+	printf '1.2.3.0/24\r\n' >"$rel/lists/ipset-all.txt.backup"
+	printf '203.0.113.113/32\r\n' >"$rel/lists/ipset-all.txt"
+	# Двоичный пейлоад с байтом 0x0d внутри: он обязан уцелеть.
+	printf 'A\r\nB' >"$rel/bin/payload.bin"
+
+	python3 "$REPO/tools/vendor-sync.py" "$rel" "$out" --version 9.9.9 >/dev/null
+
+	run grep -c $'\r' "$out/flowseal/lists/list-general.txt"
+	[ "$output" = "0" ]
+	run grep -c $'\r' "$out/flowseal/lists/ipset-all.full.txt"
+	[ "$output" = "0" ]
+
+	# .bin должен остаться байт в байт.
+	cmp "$rel/bin/payload.bin" "$out/flowseal/fake/payload.bin"
+}

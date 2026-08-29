@@ -45,6 +45,18 @@ IPSET_TARGET = "ipset-all.full.txt"
 IPSET_PLACEHOLDER = "203.0.113.113/32"
 
 
+def copy_list(src, dst):
+    """Копирует текстовый список, приводя переносы строк к LF.
+
+    Только для списков: .bin - двоичные пейлоады, их трогать нельзя.
+    """
+    with open(src, "rb") as f:
+        data = f.read()
+    data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    with open(dst, "wb") as f:
+        f.write(data)
+
+
 def sha256_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -157,12 +169,12 @@ def main():
             continue
         if not f.endswith(".txt"):
             continue
-        shutil.copy2(os.path.join(src_lists, f), os.path.join(dst_lists, f))
+        copy_list(os.path.join(src_lists, f), os.path.join(dst_lists, f))
         copied.append(f)
 
     ipset_src = os.path.join(src_lists, IPSET_SOURCE)
     if os.path.isfile(ipset_src):
-        shutil.copy2(ipset_src, os.path.join(dst_lists, IPSET_TARGET))
+        copy_list(ipset_src, os.path.join(dst_lists, IPSET_TARGET))
         copied.append(IPSET_TARGET)
     else:
         # в редком случае релиз может приехать уже в режиме loaded
@@ -176,7 +188,7 @@ def main():
                 file=sys.stderr,
             )
             return 1
-        shutil.copy2(plain, os.path.join(dst_lists, IPSET_TARGET))
+        copy_list(plain, os.path.join(dst_lists, IPSET_TARGET))
         copied.append(IPSET_TARGET)
     print(f"[ + ] lists: {len(copied)} файлов")
 
