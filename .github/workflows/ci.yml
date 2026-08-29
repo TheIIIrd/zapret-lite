@@ -95,11 +95,18 @@ jobs:
                 install.sh uninstall.sh /tmp/pkg/
           python3 tools/make-package-manifest.py /tmp/pkg
           python3 tools/make-package-manifest.py /tmp/pkg --check
-          # Подмена обязана обнаруживаться.
+
+          # Негативная проверка: подмена обязана обнаруживаться.
+          # Строка "[ - ] изменён: strategies/general.conf" ниже - это
+          # ОЖИДАЕМЫЙ результат, а не сбой. Без него шаг падает.
+          echo
+          echo "--- дальше стратегия портится намеренно;"
+          echo "--- сообщение об изменении ниже означает, что защита работает"
           echo '# tampered' >> /tmp/pkg/strategies/general.conf
           if python3 tools/make-package-manifest.py /tmp/pkg --check; then
             echo "::error::подмена стратегии не обнаружена"; exit 1
           fi
+          echo "--- подмена обнаружена, как и требовалось"
 
   strategies:
     runs-on: ubuntu-latest
@@ -256,6 +263,12 @@ jobs:
           ( cd /tmp/zapret && tar -cf - --exclude=./.git --exclude=./config . ) \
             | tar -xf - -C /tmp/pkg/zapret
           cp vendor/zapret/zapret.lock /tmp/pkg/zapret/
+
+          # Манифест строится и здесь: иначе установка идёт по пути "из
+          # дерева репозитория" и проверку целостности не исполняет
+          # вовсе, а именно она защищает strategies/*.conf - shell-код,
+          # читаемый от root.
+          python3 tools/make-package-manifest.py /tmp/pkg
 
           # Установка в префикс: systemd не задействуется, служба не
           # регистрируется, сеть runner'а не затрагивается.
