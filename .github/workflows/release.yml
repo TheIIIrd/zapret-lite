@@ -108,7 +108,8 @@ jobs:
           # и что только сбивает с толку в дереве установки.
           mkdir -p "dist/$NAME/zapret"
           ( cd "$ZAPRET_SRC" && tar -cf - \
-              --exclude=./.git --exclude=./docs --exclude=./config \
+              --exclude=./.git --exclude=./.github \
+              --exclude=./docs --exclude=./config \
               --exclude=./init.d/openwrt --exclude=./init.d/openwrt-minimal \
               --exclude=./init.d/pfsense --exclude=./files/huawei \
               . ) | tar -xf - -C "dist/$NAME/zapret"

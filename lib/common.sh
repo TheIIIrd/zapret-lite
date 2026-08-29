@@ -89,9 +89,14 @@ zl_verify_manifest() {
 	sed 's/^[0-9a-f]*  //' "$dir/MANIFEST.sha256" | sort >"$listed"
 	# Каталоги, которых в релизном комплекте не бывает. При установке из
 	# дерева репозитория они есть и лишними не считаются.
+	# Список исключений обязан совпадать со SKIP_DIRS в
+	# tools/make-package-manifest.py, причём и по глубине: там пропуск
+	# работает на любом уровне вложенности, значит и здесь тоже.
+	# Когда правила разошлись, файлы zapret/.github/* попали в проверку,
+	# но не в манифест, и установка обрывалась на "лишних файлах".
 	( cd "$dir" && find . -type f \
-	    ! -path './.git/*' ! -path './.github/*' ! -path './tests/*' \
-	    ! -path './dist/*' ! -name '*.pyc' ! -path '*/__pycache__/*' \
+	    ! -path '*/.git/*' ! -path '*/.github/*' ! -path '*/tests/*' \
+	    ! -path '*/dist/*' ! -name '*.pyc' ! -path '*/__pycache__/*' \
 	    ! -name MANIFEST.sha256 -printf '%P\n' ) | sort >"$present"
 
 	extra="$(comm -13 "$listed" "$present")"

@@ -260,7 +260,8 @@ jobs:
           cp -r bin lib config systemd strategies vendor tools \
                 install.sh uninstall.sh /tmp/pkg/
           mkdir -p /tmp/pkg/zapret
-          ( cd /tmp/zapret && tar -cf - --exclude=./.git --exclude=./config . ) \
+          ( cd /tmp/zapret && tar -cf - --exclude=./.git --exclude=./.github \
+              --exclude=./config . ) \
             | tar -xf - -C /tmp/pkg/zapret
           cp vendor/zapret/zapret.lock /tmp/pkg/zapret/
 
