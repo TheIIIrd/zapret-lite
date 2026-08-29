@@ -126,7 +126,6 @@ fi
 
 FWTYPE="$(zl_detect_fwtype)"
 [ -n "$FWTYPE" ] || zl_die "не найдены ни nft, ни iptables. Установите один из них."
-zl_info "firewall: $FWTYPE (определено; зафиксировать: --fwtype)"
 
 # Выбор стратегии - состояние пользователя. Обновление его не меняет:
 # без явного --strategy берём уже выбранную, и только при первой
@@ -166,9 +165,18 @@ else
 	EFFECTIVE_FWTYPE=auto
 fi
 # auto означает "тот, который выберет zapret", то есть определённый выше.
-[ "$EFFECTIVE_FWTYPE" = auto ] && EFFECTIVE_FWTYPE="$FWTYPE"
-zl_fwtype_available "$EFFECTIVE_FWTYPE" || exit 1
-zl_info "будет использован: $EFFECTIVE_FWTYPE"
+# Сообщение одно, и оно про то, что будет использовано на самом деле.
+# Раньше здесь печаталось ещё и автоопределение - и при явном
+# "--fwtype iptables" строка "firewall: nftables" сбивала с толку,
+# заставляя думать, что флаг проигнорирован.
+if [ "$EFFECTIVE_FWTYPE" = auto ]; then
+	EFFECTIVE_FWTYPE="$FWTYPE"
+	zl_fwtype_available "$EFFECTIVE_FWTYPE" || exit 1
+	zl_info "firewall: $EFFECTIVE_FWTYPE (автоопределение; зафиксировать: --fwtype)"
+else
+	zl_fwtype_available "$EFFECTIVE_FWTYPE" || exit 1
+	zl_info "firewall: $EFFECTIVE_FWTYPE (задан явно)"
+fi
 
 if [ -n "$WAN_IFACE" ]; then
 	case "$WAN_IFACE" in
@@ -391,6 +399,7 @@ zl_step "Подготовка $ZL_ETC"
 
 run mkdir -p "$ZL_ETC/lists"
 
+
 # Пользовательские списки: создаём только если их нет. Существующие
 # не трогаем никогда - это данные пользователя.
 #
@@ -414,12 +423,12 @@ else
 fi
 
 # ipset-all.txt - переключаемое состояние, режим по умолчанию loaded.
-if [ -e "$ZL_ETC/ipset.mode" ]; then
-	IPSET_MODE="$(cat "$ZL_ETC/ipset.mode")"
+if [ -e "$ZL_ETC/ipset" ]; then
+	IPSET_MODE="$(cat "$ZL_ETC/ipset")"
 	zl_info "режим ipset: $IPSET_MODE (сохранён с прошлой установки)"
 else
 	IPSET_MODE=loaded
-	run sh -c "echo loaded > '$ZL_ETC/ipset.mode'"
+	run sh -c "echo loaded > '$ZL_ETC/ipset'"
 	zl_info "режим ipset: loaded"
 fi
 
@@ -448,12 +457,12 @@ fi
 # IPv6. Апстримный install_easy.sh задаёт этот вопрос вслух; у нас это
 # флаг, а выбор сохраняется и переживает обновление.
 if [ -n "$IPV6_MODE" ]; then
-	run sh -c "echo '$IPV6_MODE' > '$ZL_ETC/ipv6.mode'"
+	run sh -c "echo '$IPV6_MODE' > '$ZL_ETC/ipv6'"
 	zl_info "IPv6: $IPV6_MODE"
-elif [ -e "$ZL_ETC/ipv6.mode" ]; then
-	zl_info "IPv6: $(cat "$ZL_ETC/ipv6.mode") (сохранено)"
+elif [ -e "$ZL_ETC/ipv6" ]; then
+	zl_info "IPv6: $(cat "$ZL_ETC/ipv6") (сохранено)"
 else
-	run sh -c "echo off > '$ZL_ETC/ipv6.mode'"
+	run sh -c "echo off > '$ZL_ETC/ipv6'"
 	if ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
 		zl_warn "IPv6: off, но у машины есть глобальный IPv6."
 		zl_warn "Часть трафика пойдёт мимо обхода. Включить: zapret-lite ipv6 on"
@@ -462,10 +471,10 @@ else
 	fi
 fi
 
-if [ -e "$ZL_ETC/game-filter.mode" ]; then
-	zl_info "игровой фильтр: $(cat "$ZL_ETC/game-filter.mode") (сохранён)"
+if [ -e "$ZL_ETC/game-filter" ]; then
+	zl_info "игровой фильтр: $(cat "$ZL_ETC/game-filter") (сохранён)"
 else
-	run sh -c "echo disabled > '$ZL_ETC/game-filter.mode'"
+	run sh -c "echo disabled > '$ZL_ETC/game-filter'"
 	zl_info "игровой фильтр: disabled"
 fi
 
@@ -559,6 +568,10 @@ elif [ "$DRY_RUN" = 0 ]; then
 		zl_warn "не удалось включить таймер проверки обновлений"
 	fi
 	zl_info "служба включена"
+	# Служба могла остаться в состоянии failed от прежних попыток -
+	# например, после неудачного конфига или упёршегося ограничителя.
+	# Без сброса счётчика установка споткнулась бы на ровном месте.
+	systemctl reset-failed zapret >/dev/null 2>&1 || true
 	if systemctl start zapret; then
 		zl_info "служба запущена"
 	else

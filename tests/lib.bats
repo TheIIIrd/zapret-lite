@@ -198,3 +198,33 @@ setup() {
 	run zl_verify_manifest "$d" strict
 	[ "$status" -eq 0 ]
 }
+
+@test "zl_switch_state возвращает прежнее значение, если служба не поднялась" {
+	# Опечатка в имени интерфейса оставляла службу остановленной:
+	# "wan-iface ens32" вместо "ens33" ломало обход необратимо.
+	# Ветка отката достижима только когда мы управляем systemd, то есть
+	# вне префикса и при живом /run/systemd/system. В контейнере без
+	# systemd проверять нечего.
+	[ -d /run/systemd/system ] || skip "нет systemd: ветка недостижима"
+
+	local f="$BATS_TEST_TMPDIR/state" bin="$BATS_TEST_TMPDIR/bin"
+	mkdir -p "$bin"
+	printf 'старое\n' >"$f"
+
+	# systemctl, который считает службу активной, останавливается
+	# успешно, но запуститься отказывается.
+	cat >"$bin/systemctl" <<'SYS'
+#!/bin/sh
+case "$1" in
+  is-active) exit 0 ;;
+  start)     exit 1 ;;
+esac
+exit 0
+SYS
+	chmod +x "$bin/systemctl"
+
+	ZL_PREFIX='' PATH="$bin:$PATH" run zl_switch_state "$f" "новое"
+	[ "$status" -ne 0 ]
+	[ "$(cat "$f")" = "старое" ]
+	[[ "$output" == *"не запустилась"* ]]
+}

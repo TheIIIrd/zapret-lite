@@ -2,19 +2,21 @@
 # shellcheck disable=SC3043,SC1091  # local есть в dash/ash/bash; lib подключается в рантайме
 # Менеджер zapret-lite.
 #
-#   zapret-lite status
-#   zapret-lite list
-#   zapret-lite use <стратегия>
-#   zapret-lite generations
-#   zapret-lite rollback [поколение]
-#   zapret-lite ipset [loaded|none|any]
-#   zapret-lite game-filter [disabled|all]
-#   zapret-lite ipv6 [on|off]
-#   zapret-lite fwtype [auto|iptables|nftables]
-#   zapret-lite wan-iface [имя|any]
-#   zapret-lite doctor
-#   zapret-lite check-update
-#   zapret-lite restart
+#   zapret-lite status                              st
+#   zapret-lite list                                li
+#   zapret-lite use <стратегия>                     us
+#   zapret-lite generations                         ge
+#   zapret-lite rollback [поколение]                ro
+#   zapret-lite ipset [loaded|none|any]             is
+#   zapret-lite game-filter [disabled|all]          gf
+#   zapret-lite ipv6 [on|off]                       i6
+#   zapret-lite fwtype [auto|iptables|nftables]     fw
+#   zapret-lite wan-iface [имя|any]                 wi
+#   zapret-lite doctor                              do
+#   zapret-lite check-update                        cu
+#   zapret-lite restart                             re
+#
+# Справа - короткие формы: "zapret-lite st" то же, что "zapret-lite status".
 #
 # Операции, меняющие состояние, требуют root. Чтение - нет.
 # Обновление - это запуск install.sh из нового комплекта, отдельной
@@ -45,6 +47,7 @@ restart_service() {
 		zl_warn "служба zapret не включена"
 		return 0
 	}
+	systemctl reset-failed zapret >/dev/null 2>&1 || true
 	if systemctl restart zapret; then
 		zl_info "служба перезапущена"
 	else
@@ -87,8 +90,8 @@ cmd_status() {
 	gen=$(zl_generation_current 2>/dev/null) || gen="(нет)"
 	prev=$(zl_generation_previous 2>/dev/null) || prev="(нет)"
 	strat=$(current_strategy)
-	mode=$(read_state "$ZL_ETC/ipset.mode" loaded)
-	game=$(read_state "$ZL_ETC/game-filter.mode" disabled)
+	mode=$(read_state "$ZL_ETC/ipset" loaded)
+	game=$(read_state "$ZL_ETC/game-filter" disabled)
 	# Показываем зафиксированный выбор, а не автоопределение: иначе
 	# после "fwtype iptables" status продолжал уверять, что nftables.
 	fw=$(read_state "$ZL_ETC/fwtype" auto)
@@ -96,7 +99,12 @@ cmd_status() {
 		fw="$(zl_detect_fwtype) (авто)"
 	fi
 
-	if zl_manage_systemd && systemctl is-active --quiet zapret 2>/dev/null; then
+	if ! zl_manage_systemd; then
+		# В префиксе службы нет вовсе: юнит лежит под ним, и настоящий
+		# systemd его не видит. Писать "остановлена" - вводить в
+		# заблуждение: останавливать было нечего.
+		active="не управляется (префикс)"
+	elif systemctl is-active --quiet zapret 2>/dev/null; then
 		active="работает"
 	else
 		active="остановлена"
@@ -109,7 +117,7 @@ cmd_status() {
 	printf 'Firewall      : %s\n' "${fw:-не определён}"
 	printf 'Режим ipset   : %s\n' "$mode"
 	printf 'Игровой фильтр: %s\n' "$game"
-	printf 'IPv6          : %s\n' "$(read_state "$ZL_ETC/ipv6.mode" off)"
+	printf 'IPv6          : %s\n' "$(read_state "$ZL_ETC/ipv6" off)"
 	printf 'Интерфейс     : %s\n' "$(read_state "$ZL_ETC/wan-iface" any)"
 
 	if [ -r "$ZL_CURRENT/flowseal.lock" ]; then
@@ -200,6 +208,7 @@ cmd_rollback() {
 		zl_warn "Выберите другую: zapret-lite list && zapret-lite use <имя>"
 	fi
 
+	[ "$was_active" = 1 ] && systemctl reset-failed zapret >/dev/null 2>&1
 	if [ "$was_active" = 1 ] && ! systemctl start zapret; then
 		zl_error "служба не запустилась. Смотрите: journalctl -u zapret -n 50"
 		return 1
@@ -210,7 +219,7 @@ cmd_rollback() {
 cmd_ipset() {
 	local mode
 	if [ $# -eq 0 ]; then
-		printf 'Текущий режим: %s\n' "$(read_state "$ZL_ETC/ipset.mode" loaded)"
+		printf 'Текущий режим: %s\n' "$(read_state "$ZL_ETC/ipset" loaded)"
 		cat <<'EOF'
 
   loaded  список подсетей из flowseal активен (по умолчанию)
@@ -227,8 +236,8 @@ EOF
 	esac
 
 	zl_require_root
-	printf '%s\n' "$mode" >"$ZL_ETC/ipset.mode"
-	chmod 0644 "$ZL_ETC/ipset.mode"
+	printf '%s\n' "$mode" >"$ZL_ETC/ipset"
+	chmod 0644 "$ZL_ETC/ipset"
 	zl_apply_ipset_mode >/dev/null || exit 1
 	zl_info "режим ipset: $mode"
 	# Рестарт не нужен: nfqws перечитает файл по mtime.
@@ -238,7 +247,7 @@ EOF
 cmd_game_filter() {
 	local mode
 	if [ $# -eq 0 ]; then
-		printf 'Текущий режим: %s\n' "$(read_state "$ZL_ETC/game-filter.mode" disabled)"
+		printf 'Текущий режим: %s\n' "$(read_state "$ZL_ETC/game-filter" disabled)"
 		cat <<'EOF'
 
   disabled  игровой трафик не обрабатывается (по умолчанию)
@@ -254,7 +263,7 @@ EOF
 	esac
 
 	zl_require_root
-	zl_switch_state "$ZL_ETC/game-filter.mode" "$mode" || return 1
+	zl_switch_state "$ZL_ETC/game-filter" "$mode" || return 1
 	zl_info "игровой фильтр: $mode"
 }
 
@@ -262,7 +271,7 @@ EOF
 cmd_ipv6() {
 	local mode
 	if [ $# -eq 0 ]; then
-		printf 'Текущий режим: %s\n' "$(read_state "$ZL_ETC/ipv6.mode" off)"
+		printf 'Текущий режим: %s\n' "$(read_state "$ZL_ETC/ipv6" off)"
 		cat <<'EOF'
 
   off  трафик IPv6 не обрабатывается (по умолчанию, как у апстрима)
@@ -285,7 +294,7 @@ EOF
 	# Не restart: в режиме iptables снятие правил IPv6 зависит от того
 	# же DISABLE_IPV6, поэтому выключение через restart оставило бы их
 	# висеть.
-	zl_switch_state "$ZL_ETC/ipv6.mode" "$mode" || return 1
+	zl_switch_state "$ZL_ETC/ipv6" "$mode" || return 1
 	zl_info "IPv6: $mode"
 }
 
@@ -362,7 +371,7 @@ d_warn() { printf '  [ ! ] %s\n' "$*"; DOCTOR_WARN=$((DOCTOR_WARN + 1)); }
 d_bad()  { printf '  [ - ] %s\n' "$*"; DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); }
 
 cmd_doctor() {
-	local gen strat fw n missing bin out mode p dis6 want virt
+	local gen strat fw n missing bin out mode p dis6 want virt iface i
 
 	printf '\n--- Окружение\n'
 	if [ -n "$ZL_PREFIX" ]; then
@@ -509,8 +518,28 @@ cmd_doctor() {
 		fi
 	fi
 
+	# Ограничение по интерфейсу - тихий отказ: на nftables служба
+	# стартует нормально, имя просто кладётся в набор, и правила не
+	# совпадают ни с чем. Опечатка выглядит как неработающая стратегия.
+	iface=$(read_state "$ZL_ETC/wan-iface" any)
+	if [ "$iface" = any ]; then
+		d_ok "интерфейсы: обрабатываются все"
+	else
+		missing=''
+		for i in $iface; do
+			ip link show "$i" >/dev/null 2>&1 || missing="${missing:+$missing }$i"
+		done
+		if [ -z "$missing" ]; then
+			d_ok "интерфейсы: $iface"
+		else
+			d_bad "интерфейса нет в системе: $missing
+        Правила его не найдут, обход не сработает.
+        Список: ip -o link show; сброс: zapret-lite wan-iface any"
+		fi
+	fi
+
 	printf '\n--- Списки\n'
-	mode=$(read_state "$ZL_ETC/ipset.mode" loaded)
+	mode=$(read_state "$ZL_ETC/ipset" loaded)
 	d_ok "режим ipset: $mode"
 	for f in list-general-user.txt list-exclude-user.txt; do
 		if [ ! -e "$ZL_ETC/lists/$f" ]; then
@@ -661,12 +690,36 @@ EOF
 	return 0
 }
 
+# Короткие формы. Отдельной функцией, а не ветками в основном case:
+# иначе таблица команд раздвоилась бы, и справка с разбором однажды
+# разошлись бы. Сокращения перечислены во втором столбце справки.
+zl_expand_alias() {
+	case "$1" in
+		st) echo status ;;
+		li) echo list ;;
+		us) echo use ;;
+		ge) echo generations ;;
+		ro) echo rollback ;;
+		is) echo ipset ;;
+		gf) echo game-filter ;;
+		i6) echo ipv6 ;;
+		fw) echo fwtype ;;
+		wi) echo wan-iface ;;
+		do) echo doctor ;;
+		cu) echo check-update ;;
+		re) echo restart ;;
+		*)  echo "$1" ;;
+	esac
+}
+
 # --- разбор аргументов ------------------------------------------------
 
 [ $# -gt 0 ] || { usage; exit 1; }
 
 cmd="$1"
 shift
+
+cmd=$(zl_expand_alias "$cmd")
 
 case "$cmd" in
 	status)       cmd_status "$@" ;;

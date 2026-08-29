@@ -77,20 +77,23 @@ sudo ./install.sh
 ## Использование
 
 ```
-zapret-lite status              что сейчас происходит
-zapret-lite list                доступные стратегии
-zapret-lite use <имя>           переключить стратегию
-zapret-lite doctor              диагностика
-zapret-lite generations         установленные поколения
-zapret-lite rollback            вернуться к предыдущему
-zapret-lite ipset <режим>       loaded | none | any
-zapret-lite game-filter <режим> disabled | all
-zapret-lite ipv6 <режим>        on | off
-zapret-lite fwtype <тип>        auto | iptables | nftables
-zapret-lite wan-iface <имя>     только этот интерфейс, any — все
-zapret-lite check-update        есть ли новые стратегии
-zapret-lite restart             перезапустить службу
+zapret-lite status              st   что сейчас происходит
+zapret-lite list                li   доступные стратегии
+zapret-lite use <имя>           us   переключить стратегию
+zapret-lite doctor              do   диагностика
+zapret-lite generations         ge   установленные поколения
+zapret-lite rollback            ro   вернуться к предыдущему
+zapret-lite ipset <режим>       is   loaded | none | any
+zapret-lite game-filter <режим> gf   disabled | all
+zapret-lite ipv6 <режим>        i6   on | off
+zapret-lite fwtype <тип>        fw   auto | iptables | nftables
+zapret-lite wan-iface <имя>     wi   только этот интерфейс, any — все
+zapret-lite check-update        cu   есть ли новые стратегии
+zapret-lite restart             re   перезапустить службу
 ```
+
+Второй столбец — короткие формы: `zapret-lite st` то же, что
+`zapret-lite status`.
 
 Команды, меняющие состояние, требуют `sudo`; чтение — нет.
 
