@@ -88,6 +88,7 @@ zapret-lite game-filter <режим> gf   disabled | all
 zapret-lite ipv6 <режим>        i6   on | off
 zapret-lite fwtype <тип>        fw   auto | iptables | nftables
 zapret-lite wan-iface <имя>     wi   только этот интерфейс, any — все
+zapret-lite auto-restart <ин>   ar   экспериментально: off | 6h..24h
 zapret-lite check-update        cu   есть ли новые стратегии
 zapret-lite restart             re   перезапустить службу
 ```
@@ -151,10 +152,11 @@ sudo zapret-lite restart
 nftables мы не будем.
 
 Ограничить обработку одним интерфейсом (полезно там, где много лишних —
-docker, мосты, VPN):
+docker, мосты, VPN), либо задать несколько через пробел:
 
 ```sh
 sudo zapret-lite wan-iface eth0
+sudo zapret-lite wan-iface "eth0 wlan0"
 ```
 
 **Не редактируйте `/opt/zapret/config`.** Он генерируется, и установщик

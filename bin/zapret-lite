@@ -12,6 +12,7 @@
 #   zapret-lite ipv6 [on|off]                       i6
 #   zapret-lite fwtype [auto|iptables|nftables]     fw
 #   zapret-lite wan-iface [имя|any]                 wi
+#   zapret-lite auto-restart [off|6h..24h]          ar
 #   zapret-lite doctor                              do
 #   zapret-lite check-update                        cu
 #   zapret-lite restart                             re
@@ -85,7 +86,7 @@ cmd_list() {
 }
 
 cmd_status() {
-	local gen prev strat mode game fw active
+	local gen prev strat mode game fw active auto
 
 	gen=$(zl_generation_current 2>/dev/null) || gen="(нет)"
 	prev=$(zl_generation_previous 2>/dev/null) || prev="(нет)"
@@ -119,6 +120,8 @@ cmd_status() {
 	printf 'Игровой фильтр: %s\n' "$game"
 	printf 'IPv6          : %s\n' "$(read_state "$ZL_ETC/ipv6" off)"
 	printf 'Интерфейс     : %s\n' "$(read_state "$ZL_ETC/wan-iface" any)"
+	auto=$(read_state "$ZL_ETC/auto-restart" off)
+	[ "$auto" = off ] || printf 'Автоперезапуск: %s (экспериментально)\n' "$auto"
 
 	if [ -r "$ZL_CURRENT/flowseal.lock" ]; then
 		printf 'Списки от     : flowseal %s (синхронизировано %s)\n' \
@@ -359,6 +362,79 @@ EOF
 	fi
 	zl_switch_state "$ZL_ETC/wan-iface" "$iface" || return 1
 	zl_info "интерфейс: $iface"
+}
+
+cmd_auto_restart() {
+	local iv cur
+	cur=$(read_state "$ZL_ETC/auto-restart" off)
+
+	if [ $# -eq 0 ]; then
+		printf 'Текущий интервал: %s\n' "$cur"
+		cat <<'EOF'
+
+  off      не перезапускать (по умолчанию)
+  6h..24h  перезапускать с этим интервалом
+
+  ЭКСПЕРИМЕНТАЛЬНО, включать не рекомендуется.
+
+  Перезапуск не бесплатен: правила снимаются и ставятся заново, в
+  промежутке обхода нет, активные соединения через очередь рвутся, а
+  счётчики connbytes сбрасываются - соединение, начатое до перезапуска,
+  продолжится без обработки.
+
+  Падение nfqws он не лечит: этим занимается Restart=always в юните.
+  Если обход со временем портится, причина скорее в стратегии или в
+  устаревшем списке адресов, и таймер её замаскирует, а не устранит.
+  Сначала стоит посмотреть zapret-lite doctor в момент поломки.
+EOF
+		return 0
+	fi
+
+	iv="$1"
+	zl_valid_interval "$iv" || zl_die "интервал: off либо целые часы от 6h до 24h"
+
+	zl_require_root
+	printf '%s\n' "$iv" >"$ZL_ETC/auto-restart"
+	chmod 0644 "$ZL_ETC/auto-restart"
+
+	if ! zl_manage_systemd; then
+		zl_info "интервал сохранён: $iv (в префиксе таймер не трогаем)"
+		return 0
+	fi
+
+	local dir="$ZL_SYSTEMD_DIR/zapret-lite-restart.timer.d"
+	if [ "$iv" = off ]; then
+		systemctl disable --now zapret-lite-restart.timer >/dev/null 2>&1 || true
+		rm -f "$dir/interval.conf"
+		rmdir "$dir" 2>/dev/null || true
+		systemctl daemon-reload
+		zl_info "автоперезапуск выключен"
+		return 0
+	fi
+
+	mkdir -p "$dir"
+	# Интервал задаётся drop-in'ом, а не правкой юнита: обновление
+	# перезапишет юнит, а этот файл переживёт.
+	{
+		printf '# Создано zapret-lite. Меняйте через: zapret-lite auto-restart
+'
+		printf '[Timer]
+OnUnitActiveSec=%s
+OnBootSec=%s
+' "$iv" "$iv"
+	} >"$dir/interval.conf"
+	chmod 0644 "$dir/interval.conf"
+
+	systemctl daemon-reload
+	if systemctl enable --now zapret-lite-restart.timer >/dev/null 2>&1; then
+		zl_warn "автоперезапуск включён с интервалом $iv."
+		zl_warn "Это экспериментально: перезапуск рвёт активные соединения"
+		zl_warn "и маскирует причину, вместо того чтобы её устранить."
+		zl_warn "Выключить: sudo zapret-lite auto-restart off"
+	else
+		zl_error "не удалось включить таймер"
+		return 1
+	fi
 }
 
 # --- диагностика ------------------------------------------------------
@@ -729,6 +805,7 @@ zl_expand_alias() {
 		i6) echo ipv6 ;;
 		fw) echo fwtype ;;
 		wi) echo wan-iface ;;
+		ar) echo auto-restart ;;
 		do) echo doctor ;;
 		cu) echo check-update ;;
 		re) echo restart ;;
@@ -756,6 +833,7 @@ case "$cmd" in
 	ipv6)         cmd_ipv6 "$@" ;;
 	fwtype)       cmd_fwtype "$@" ;;
 	wan-iface)    cmd_wan_iface "$@" ;;
+	auto-restart) cmd_auto_restart "$@" ;;
 	doctor)       cmd_doctor "$@" ;;
 	check-update) cmd_check_update "$@" ;;
 	restart)      zl_require_root; restart_service ;;

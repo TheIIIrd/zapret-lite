@@ -551,6 +551,12 @@ run cp -f "$SRC/systemd/10-zapret-lite.conf" "$ZL_SYSTEMD_DIR/zapret.service.d/1
 run cp -f "$SRC/systemd/zapret-lite-check-update.service" "$ZL_SYSTEMD_DIR/"
 run cp -f "$SRC/systemd/zapret-lite-check-update.timer" "$ZL_SYSTEMD_DIR/"
 
+# Экспериментальный таймер периодического перезапуска. Файлы кладём,
+# но НЕ включаем: он рвёт активные соединения и маскирует причину
+# поломки. Включается только вручную: zapret-lite auto-restart 12h
+run cp -f "$SRC/systemd/zapret-lite-restart.service" "$ZL_SYSTEMD_DIR/"
+run cp -f "$SRC/systemd/zapret-lite-restart.timer" "$ZL_SYSTEMD_DIR/"
+
 if [ "$DRY_RUN" = 0 ] && ! zl_manage_systemd; then
 	zl_info "служба не регистрируется: установка в префикс"
 elif [ "$DRY_RUN" = 0 ]; then
