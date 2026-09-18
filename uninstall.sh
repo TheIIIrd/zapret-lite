@@ -97,8 +97,15 @@ zl_step "Удаление юнитов"
 if zl_manage_systemd; then
 	run systemctl disable --now zapret-lite-check-update.timer >/dev/null 2>&1 || true
 fi
+if zl_manage_systemd; then
+	run systemctl disable --now zapret-lite-restart.timer >/dev/null 2>&1 || true
+fi
 run rm -f "$ZL_SYSTEMD_DIR/zapret-lite-check-update.service" \
-          "$ZL_SYSTEMD_DIR/zapret-lite-check-update.timer"
+          "$ZL_SYSTEMD_DIR/zapret-lite-check-update.timer" \
+          "$ZL_SYSTEMD_DIR/zapret-lite-restart.service" \
+          "$ZL_SYSTEMD_DIR/zapret-lite-restart.timer"
+run rm -f "$ZL_SYSTEMD_DIR/zapret-lite-restart.timer.d/interval.conf"
+run rmdir "$ZL_SYSTEMD_DIR/zapret-lite-restart.timer.d" 2>/dev/null || true
 run rm -f "$ZL_SYSTEMD_DIR/zapret.service"
 run rm -f "$ZL_SYSTEMD_DIR/zapret.service.d/10-zapret-lite.conf"
 run rmdir "$ZL_SYSTEMD_DIR/zapret.service.d" 2>/dev/null || true

@@ -1,0 +1,14 @@
+[Unit]
+Description=zapret-lite: периодический перезапуск zapret (экспериментально)
+Documentation=https://github.com/TheIIIrd/zapret-lite
+
+[Service]
+Type=oneshot
+
+# Намеренный перезапуск не должен копиться в счётчике аварий: иначе
+# несколько срабатываний подряд упрутся в ограничитель systemd.
+ExecStart=/usr/bin/systemctl reset-failed zapret.service
+ExecStart=/usr/bin/systemctl restart zapret.service
+
+# Здесь нужен root: перезапуск чужой службы. Sandbox неприменим, но и
+# делать эта служба больше ничего не умеет - две команды systemctl.

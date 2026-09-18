@@ -1,0 +1,19 @@
+[Unit]
+Description=zapret-lite: таймер периодического перезапуска (экспериментально)
+Documentation=https://github.com/TheIIIrd/zapret-lite
+
+[Timer]
+# Интервал задаётся drop-in'ом, который пишет "zapret-lite auto-restart".
+# Здесь только значение по умолчанию на случай, если drop-in отсутствует.
+OnUnitActiveSec=24h
+OnBootSec=24h
+
+# Persistent намеренно НЕ включён. Он нужен, чтобы наверстать
+# пропущенное срабатывание после включения машины, но здесь это дало бы
+# перезапуск сразу при загрузке - ровно тогда, когда служба и так только
+# что стартовала.
+AccuracySec=1min
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

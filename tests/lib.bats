@@ -297,3 +297,26 @@ SYS
 	PATH="$bin" run zl_install_hint nftables
 	[[ "$output" == *"средствами вашего дистрибутива"* ]]
 }
+
+# --- интервал автоперезапуска -----------------------------------------
+#
+# Тесты написаны до реализации. Диапазон узкий намеренно: чаще шести
+# часов - это уже не "на всякий случай", а маскировка проблемы; реже
+# суток бессмысленно.
+
+@test "zl_valid_interval принимает часы от 6 до 24 и off" {
+	local v
+	for v in off 6h 7h 12h 18h 24h; do
+		zl_valid_interval "$v" || { echo "отвергнут: $v"; return 1; }
+	done
+}
+
+@test "zl_valid_interval отвергает всё остальное" {
+	local v
+	for v in '' 0h 5h 25h 100h h 12 12m 12d '6h;id' '$(id)' сутки -6h 06h; do
+		if zl_valid_interval "$v"; then
+			echo "принято недопустимое: '$v'"
+			return 1
+		fi
+	done
+}

@@ -1019,3 +1019,42 @@ PY
 	printf '%s' "$d" | grep -q 'проверяется от root' \
 		|| { echo "не различает случай, когда узнать нельзя"; return 1; }
 }
+
+# --- экспериментальный автоперезапуск ---------------------------------
+
+@test "auto-restart по умолчанию выключен и предупреждает" {
+	run zl auto-restart
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"Текущий интервал: off"* ]]
+	[[ "$output" == *"ЭКСПЕРИМЕНТАЛЬНО"* ]]
+	[[ "$output" == *"рвутся"* ]]
+}
+
+@test "auto-restart отвергает недопустимый интервал" {
+	for bad in 5h 25h 12m сутки '6h;id'; do
+		run zl auto-restart "$bad"
+		[ "$status" -ne 0 ] || { echo "принято: $bad"; return 1; }
+	done
+	[ ! -e "$ZL_PREFIX/etc/zapret-lite/auto-restart" ] ||
+		[ "$(cat "$ZL_PREFIX/etc/zapret-lite/auto-restart")" = off ]
+}
+
+@test "auto-restart сохраняет интервал и показывает его в status" {
+	zl auto-restart 12h
+	[ "$(cat "$ZL_PREFIX/etc/zapret-lite/auto-restart")" = "12h" ]
+	run zl status
+	[[ "$output" == *"Автоперезапуск: 12h (экспериментально)"* ]]
+
+	zl auto-restart off
+	run zl status
+	[[ "$output" != *"Автоперезапуск"* ]]
+}
+
+@test "установщик кладёт таймер перезапуска, но не включает его" {
+	grep -q 'zapret-lite-restart.timer' "$REPO/install.sh"
+	# Включения быть не должно: только копирование.
+	! grep -q 'enable.*zapret-lite-restart' "$REPO/install.sh"
+	# А деинсталлятор обязан его выключить и убрать.
+	grep -q 'disable --now zapret-lite-restart.timer' "$REPO/uninstall.sh"
+	grep -q 'interval.conf' "$REPO/uninstall.sh"
+}
