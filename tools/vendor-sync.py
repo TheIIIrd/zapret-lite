@@ -206,7 +206,7 @@ def main():
             "source_url=https://github.com/Flowseal/zapret-discord-youtube"
             f"/releases/tag/{args.version}\n"
         )
-        f.write(f"synced_utc={datetime.datetime.now(datetime.timezone.utc):%Y-%m-%dT%H:%M:%SZ}\n")
+        f.write(f"synced_utc={datetime.datetime.now(datetime.UTC):%Y-%m-%dT%H:%M:%SZ}\n")
 
     # --- манифест
     entries = []
